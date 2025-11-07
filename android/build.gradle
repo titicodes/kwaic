@@ -1,0 +1,37 @@
+buildscript {
+    ext.kotlin_version =  "2.2.0"
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jitpack.io' } // Required for ffmpeg-kit
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.6.1'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        classpath 'com.google.gms:google-services:4.4.4'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://jitpack.io" }
+
+        // ✅ Correct FFmpegKit repository (with trailing slash)
+        maven { url "https://github.com/tanersener/ffmpeg-kit/releases/download/repository/" }
+    }
+}
+
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}

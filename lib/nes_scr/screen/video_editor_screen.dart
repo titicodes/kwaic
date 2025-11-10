@@ -22,20 +22,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     with TickerProviderStateMixin {
   // ────── STATE ──────
   bool isPlaying = false;
-  Duration playheadPosition = const Duration(seconds: 1);
+  Duration playheadPosition = Duration.zero;
   int? selectedClip;
-  final double totalDuration = 12.0;
-  final double pixelsPerSecond = 80.0;
-  Timer? playbackTimer;
+  double pixelsPerSecond = 80.0;
+  double _totalDuration = 12.0;
   final ScrollController timelineScrollController = ScrollController();
-  final ImagePicker _picker = ImagePicker();
-  List<TimelineItem> clips = [];
-  List<TimelineItem> audioItems = [];
-  List<TimelineItem> textItems = [];
-  List<TimelineItem> overlayItems = [];
   final Map<String, VideoPlayerController> _controllers = {};
-  final Map<String, dynamic> _audioControllers = {};
   VideoPlayerController? _activePreviewController;
+  List<VideoPlayerController> _activeAudioControllers = [];
   TimelineItem? _activeItem;
   late Ticker _playbackTicker;
   int _lastFrameTime = 0;
@@ -44,21 +38,39 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   List<EditorState> history = [];
   int historyIndex = -1;
 
+  // Tracks
+  List<TimelineItem> clips = []; // Video
+  List<TimelineItem> audioItems = []; // Audio (layered)
+  List<TimelineItem> overlayItems = []; // Images
+  List<TimelineItem> textItems = []; // Text
+
+  // Resize state
+  String? _resizeMode;
+  Duration _initialStartTime = Duration.zero;
+  Duration _initialDuration = Duration.zero;
+
+  final double totalDuration = 12.0;
+
+  Timer? playbackTimer;
+
+  final ImagePicker _picker = ImagePicker();
+
+  final Map<String, dynamic> _audioControllers = {};
+
   // ────── LIFECYCLE ──────
   @override
   void initState() {
     super.initState();
     _lastFrameTime = DateTime.now().millisecondsSinceEpoch;
     _playbackTicker = createTicker(_playbackFrame)..start();
+    _updateTotalDuration();
   }
 
   @override
   void dispose() {
     _playbackTicker.dispose();
     timelineScrollController.dispose();
-    playbackTimer?.cancel();
     for (final c in _controllers.values) c.dispose();
-    for (final c in _audioControllers.values) if (c != null) c.dispose();
     super.dispose();
   }
 
@@ -90,6 +102,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         overlayItems = state.overlayItems.map((o) => o.copyWith()).toList();
         selectedClip = state.selectedClip;
         playheadPosition = state.playheadPosition;
+        _updateTotalDuration();
       });
     }
   }
@@ -105,6 +118,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         overlayItems = state.overlayItems.map((o) => o.copyWith()).toList();
         selectedClip = state.selectedClip;
         playheadPosition = state.playheadPosition;
+        _updateTotalDuration();
       });
     }
   }
@@ -116,15 +130,18 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final deltaMs = now - _lastFrameTime;
     _lastFrameTime = now;
     if (deltaMs <= 0 || deltaMs > 100) return;
+
     setState(() {
       playheadPosition += Duration(milliseconds: deltaMs);
-      if (playheadPosition.inMilliseconds >= totalDuration * 1000) {
-        playheadPosition = Duration(
-          milliseconds: (totalDuration * 1000).toInt(),
-        );
+      if (playheadPosition.inSeconds > _totalDuration) {
+        playheadPosition = Duration(seconds: _totalDuration.toInt());
         isPlaying = false;
         _playbackTicker.stop();
       }
+      selectedClip =
+      getClipAtPlayhead()?.id != null
+          ? int.parse(getClipAtPlayhead()!.id)
+          : null;
     });
     _autoScrollTimeline();
     _updatePreview();
@@ -133,7 +150,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   void togglePlayPause() {
     setState(() {
       isPlaying = !isPlaying;
-      if (isPlaying && playheadPosition.inMilliseconds >= totalDuration * 1000) {
+      if (isPlaying && playheadPosition.inSeconds >= _totalDuration) {
         playheadPosition = Duration.zero;
       }
     });
@@ -147,12 +164,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   void _autoScrollTimeline() {
     if (!timelineScrollController.hasClients) return;
-    const double leftPadding = 136.0;
+    const double leftPanelWidth = 180.0;
     final double playheadPixel =
-        playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
-    final double target = leftPadding +
-        playheadPixel -
-        MediaQuery.of(context).size.width / 2;
+        playheadPosition.inSeconds.toDouble() * pixelsPerSecond;
+    final double target =
+        leftPanelWidth + playheadPixel - MediaQuery.of(context).size.width / 2;
     final double maxScroll = timelineScrollController.position.maxScrollExtent;
     final double clamped = target.clamp(0.0, maxScroll);
     if ((clamped - timelineScrollController.offset).abs() > 5) {
@@ -160,30 +176,69 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
+  List<TimelineItem> _findActiveAudios() {
+    return audioItems.where((item) {
+      final effectiveDur = Duration(
+        milliseconds: (item.duration.inMilliseconds / item.speed).round(),
+      );
+      return playheadPosition >= item.startTime &&
+          playheadPosition < item.startTime + effectiveDur;
+    }).toList();
+  }
   void _updatePreview() {
     if (!mounted) return;
-    final active = _findActiveVideo();
-    setState(() => _activeItem = active);
-    if (active != null && _controllers.containsKey(active.id)) {
-      final ctrl = _controllers[active.id]!;
-      final local = playheadPosition - active.startTime;
-      final source = active.trimStart +
-          Duration(milliseconds: (local.inMilliseconds * active.speed).round());
+    final activeVideo = _findActiveVideo();
+    setState(() => _activeItem = activeVideo);
+
+    // Video
+    if (activeVideo != null && _controllers.containsKey(activeVideo.id)) {
+      final ctrl = _controllers[activeVideo.id]!;
+      final local = playheadPosition - activeVideo.startTime;
+      final source =
+          activeVideo.trimStart +
+              Duration(
+                milliseconds: (local.inMilliseconds * activeVideo.speed).round(),
+              );
+
       if ((ctrl.value.position - source).inMilliseconds.abs() > 100) {
         ctrl.seekTo(source);
       }
-      ctrl.setPlaybackSpeed(active.speed);
-      ctrl.setVolume(active.volume);
+      ctrl.setPlaybackSpeed(activeVideo.speed);
+      ctrl.setVolume(activeVideo.volume);
+
       if (isPlaying && !ctrl.value.isPlaying) ctrl.play();
       if (!isPlaying && ctrl.value.isPlaying) ctrl.pause();
+
       if (_activePreviewController != ctrl) {
         _activePreviewController?.pause();
         setState(() => _activePreviewController = ctrl);
       }
     } else {
       _activePreviewController?.pause();
-      if (_activePreviewController != null) {
-        setState(() => _activePreviewController = null);
+      setState(() => _activePreviewController = null);
+    }
+
+    // Audio
+    final activeAudios = _findActiveAudios();
+    for (var ctrl in _activeAudioControllers) {
+      if (!activeAudios.any((a) => _controllers[a.id] == ctrl)) ctrl.pause();
+    }
+    _activeAudioControllers = [];
+    for (var item in activeAudios) {
+      if (_controllers.containsKey(item.id)) {
+        final ctrl = _controllers[item.id]!;
+        final local = playheadPosition - item.startTime;
+        final source =
+            item.trimStart +
+                Duration(milliseconds: (local.inMilliseconds * item.speed).round());
+        if ((ctrl.value.position - source).inMilliseconds.abs() > 100) {
+          ctrl.seekTo(source);
+        }
+        ctrl.setPlaybackSpeed(item.speed);
+        ctrl.setVolume(item.volume);
+        if (isPlaying && !ctrl.value.isPlaying) ctrl.play();
+        if (!isPlaying && ctrl.value.isPlaying) ctrl.pause();
+        _activeAudioControllers.add(ctrl);
       }
     }
   }
@@ -201,26 +256,49 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return null;
   }
 
+  void _updateTotalDuration() {
+    double maxEnd = 0.0;
+    for (var list in [clips, audioItems, overlayItems, textItems]) {
+      for (var item in list) {
+        final end =
+            item.startTime.inSeconds +
+                (item.duration.inMilliseconds / 1000 / item.speed);
+        if (end > maxEnd) maxEnd = end;
+      }
+    }
+    _totalDuration = maxEnd > 0 ? maxEnd : 12.0;
+  }
+
   // ────── TIMELINE INTERACTION ──────
   void handleTimelineClick(double localX) {
     if (timelineScrollController.hasClients) {
       final scrollOffset = timelineScrollController.offset;
-      final clickPos = (localX + scrollOffset - 136) / pixelsPerSecond;
+      const double leftPanelWidth = 180.0;
+      final clickPos =
+          (localX + scrollOffset - leftPanelWidth) / pixelsPerSecond;
       setState(() {
         playheadPosition = Duration(
-          milliseconds:
-          (clickPos * 1000).clamp(0.0, totalDuration * 1000).toInt(),
+          seconds: (clickPos).clamp(0.0, _totalDuration).toInt(),
         );
         isPlaying = false;
+        selectedClip =
+        getClipAtPlayhead()?.id != null
+            ? int.parse(getClipAtPlayhead()!.id)
+            : null;
       });
     }
   }
 
   TimelineItem? getClipAtPlayhead() {
-    for (final clip in clips) {
-      if (playheadPosition >= clip.startTime &&
-          playheadPosition < clip.startTime + clip.duration) {
-        return clip;
+    for (final list in [clips, audioItems, overlayItems, textItems]) {
+      for (final item in list) {
+        final effectiveDur = Duration(
+          milliseconds: (item.duration.inMilliseconds / item.speed).round(),
+        );
+        if (playheadPosition >= item.startTime &&
+            playheadPosition < item.startTime + effectiveDur) {
+          return item;
+        }
       }
     }
     return null;
@@ -228,24 +306,149 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   void splitClipAtPlayhead() {
     final clip = getClipAtPlayhead();
-    if (clip == null ||
-        playheadPosition <= clip.startTime ||
-        playheadPosition >= clip.startTime + clip.duration) return;
+    if (clip == null || clip.type != TimelineItemType.video) return;
     final splitPoint = playheadPosition - clip.startTime;
     setState(() {
       clips.removeWhere((c) => c.id == clip.id);
       clips.add(clip.copyWith(duration: splitPoint));
-      clips.add(clip.copyWith(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        startTime: playheadPosition,
-        duration: clip.duration - splitPoint,
-      ));
+      clips.add(
+        clip.copyWith(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          startTime: playheadPosition,
+          duration: clip.duration - splitPoint,
+        ),
+      );
       clips.sort((a, b) => a.startTime.compareTo(b.startTime));
+      _updateTotalDuration();
     });
     _showMessage('Clip split');
   }
 
   // ────── ADD MEDIA ──────
+  Future<void> _addMedia(FileType type) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: type,
+      allowMultiple: true,
+      allowedExtensions:
+      type == FileType.video
+          ? ['mp4', 'mov']
+          : type == FileType.audio
+          ? ['mp3', 'wav']
+          : ['jpg', 'png', 'gif'],
+    );
+    if (result == null || result.files.isEmpty) return;
+    _showLoading();
+    try {
+      List<TimelineItem> newItems = [];
+      Duration maxDur = Duration.zero;
+
+      for (var f in result.files) {
+        final path = f.path!;
+        final file = File(path);
+        final id = DateTime.now().millisecondsSinceEpoch.toString();
+        TimelineItemType itemType;
+        Duration dur = const Duration(seconds: 5);
+        List<String> thumbs = [];
+        VideoPlayerController? ctrl;
+
+        if (path.endsWith('.mp4') || path.endsWith('.mov')) {
+          itemType = TimelineItemType.video;
+          ctrl = VideoPlayerController.file(file);
+          await ctrl.initialize();
+          dur = ctrl.value.duration;
+          final dir = await getTemporaryDirectory();
+          for (int i = 0; i < 10; i++) {
+            final ms = (dur.inMilliseconds * i / 9).round();
+            final thumbPath = await VideoThumbnail.thumbnailFile(
+              video: path,
+              thumbnailPath: dir.path,
+              imageFormat: ImageFormat.PNG,
+              maxWidth: 100,
+              timeMs: ms,
+            );
+            if (thumbPath != null) thumbs.add(thumbPath);
+          }
+          _controllers[id] = ctrl;
+          await ctrl.setLooping(false);
+        } else if (path.endsWith('.mp3') || path.endsWith('.wav')) {
+          itemType = TimelineItemType.audio;
+          ctrl = VideoPlayerController.file(file);
+          await ctrl.initialize();
+          dur = ctrl.value.duration;
+          _controllers[id] = ctrl;
+          await ctrl.setLooping(false);
+        } else {
+          itemType = TimelineItemType.image;
+          thumbs = [path];
+        }
+
+        final item = TimelineItem(
+          id: id,
+          type: itemType,
+          file: file,
+          startTime: Duration.zero,
+          duration: dur,
+          originalDuration: dur,
+          thumbnailPaths: thumbs,
+        );
+        newItems.add(item);
+        if (dur > maxDur) maxDur = dur;
+      }
+
+      setState(() {
+        if (clips.isEmpty &&
+            audioItems.isEmpty &&
+            overlayItems.isEmpty &&
+            textItems.isEmpty) {
+          // New project → align all at 0, same duration
+          for (var item in newItems) {
+            item.startTime = Duration.zero;
+            item.duration = maxDur;
+            _addToTrack(item);
+          }
+        } else {
+          Duration pos = playheadPosition;
+          for (var item in newItems) {
+            item.startTime = pos;
+            if (item.type == TimelineItemType.audio) {
+              item.startTime = Duration.zero;
+              item.duration =
+                  Duration(seconds: _totalDuration.toInt()) + maxDur;
+            } else if (item.type == TimelineItemType.image) {
+              item.duration =
+              maxDur > Duration.zero ? maxDur : const Duration(seconds: 5);
+            }
+            _addToTrack(item);
+            pos += item.duration;
+          }
+        }
+        _updateTotalDuration();
+        if (newItems.isNotEmpty) selectedClip = int.parse(newItems.last.id);
+      });
+      _hideLoading();
+      _showMessage('Media added');
+    } catch (e) {
+      _hideLoading();
+      _showError('Failed: $e');
+    }
+  }
+  void _addToTrack(TimelineItem item) {
+    switch (item.type) {
+      case TimelineItemType.video:
+        clips.add(item);
+        break;
+      case TimelineItemType.audio:
+        audioItems.add(item);
+        break;
+      case TimelineItemType.image:
+        overlayItems.add(item);
+        break;
+      case TimelineItemType.text:
+        textItems.add(item);
+        break;
+    }
+  }
+
   Future<void> _addVideo() async {
     final XFile? file = await _picker.pickVideo(source: ImageSource.gallery);
     if (file == null) return;
@@ -358,6 +561,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     setState(() {
       textItems.add(item);
       selectedClip = int.parse(item.id);
+      _updateTotalDuration();
     });
     _showMessage('Text added');
     Future.delayed(const Duration(milliseconds: 100), () {
@@ -369,23 +573,23 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   void _showLoading() => showDialog(
     context: context,
     barrierDismissible: false,
-    builder: (_) => const Center(
-        child: CircularProgressIndicator(color: Color(0xFF00D9FF))),
+    builder:
+        (_) => const Center(
+      child: CircularProgressIndicator(color: Color(0xFF00D9FF)),
+    ),
   );
 
   void _hideLoading() {
     if (Navigator.canPop(context)) Navigator.pop(context);
   }
 
-  void _showError(String msg) =>
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), backgroundColor: Colors.red),
-      );
+  void _showError(String msg) => ScaffoldMessenger.of(
+    context,
+  ).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
 
-  void _showMessage(String msg) =>
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), backgroundColor: const Color(0xFF10B981)),
-      );
+  void _showMessage(String msg) => ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text(msg), backgroundColor: const Color(0xFF10B981)),
+  );
 
   String _formatTime(double seconds) {
     final m = (seconds / 60).floor();
@@ -393,11 +597,154 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  Widget _resizeHandle({required bool isLeft}) {
+    return Container(
+      width: 16,
+      height: double.infinity,
+      color: Colors.white.withOpacity(0.4),
+      alignment: isLeft ? Alignment.centerRight : Alignment.centerLeft,
+      child: Icon(
+        isLeft ? Icons.chevron_left : Icons.chevron_right,
+        size: 14,
+        color: Colors.black87,
+      ),
+    );
+  }
+
+  // ────── CLIP WIDGET (with handles) ──────
+  Widget _buildClipWidget(TimelineItem item, TimelineItemType trackType) {
+    final isSel = selectedClip == int.tryParse(item.id);
+    final width =
+        (item.duration.inMilliseconds / 1000 / item.speed) * pixelsPerSecond;
+
+    late Color bgColor;
+    late Widget inner;
+    final double height = trackType == TimelineItemType.video ? 56.0 : 26.0;
+
+    switch (trackType) {
+      case TimelineItemType.video:
+        bgColor = Colors.grey[800]!;
+        inner =
+        item.thumbnailPaths.isNotEmpty
+            ? Image.file(File(item.thumbnailPaths.first), fit: BoxFit.cover)
+            : const Icon(Icons.videocam, color: Colors.white70);
+        break;
+      case TimelineItemType.audio:
+        bgColor = Colors.blue[900]!;
+        inner = Text(
+          item.fileName,
+          style: const TextStyle(fontSize: 10, color: Colors.white),
+          overflow: TextOverflow.ellipsis,
+        );
+        break;
+      case TimelineItemType.image:
+        bgColor = Colors.green[900]!;
+        inner =
+        item.thumbnailPaths.isNotEmpty
+            ? Image.file(File(item.thumbnailPaths.first), fit: BoxFit.cover)
+            : const Icon(Icons.image, color: Colors.white70);
+        break;
+      case TimelineItemType.text:
+        bgColor = Colors.yellow[900]!;
+        inner = Text(
+          item.text ?? 'Text',
+          style: const TextStyle(fontSize: 10, color: Colors.black),
+        );
+        break;
+      default:
+        bgColor = Colors.grey;
+        inner = const SizedBox();
+    }
+
+    return GestureDetector(
+      onPanStart: (d) {
+        _resizeMode = null;
+        final box = context.findRenderObject() as RenderBox;
+        final localX = box.globalToLocal(d.globalPosition).dx;
+        if (localX < 20) {
+          _resizeMode = 'left';
+        } else if (localX > width - 20) {
+          _resizeMode = 'right';
+        } else {
+          _resizeMode = 'move';
+        }
+        _initialStartTime = item.startTime;
+        _initialDuration = item.duration;
+      },
+      onPanUpdate: (d) {
+        final deltaSec = d.delta.dx / pixelsPerSecond;
+        final delta = Duration(milliseconds: (deltaSec * 1000).round());
+        setState(() {
+          if (_resizeMode == 'left') {
+            final newStart = _initialStartTime + delta;
+            final newDur = _initialDuration - delta;
+            if (newStart >= Duration.zero && newDur.inSeconds > 1) {
+              item.startTime = newStart;
+              item.duration = newDur;
+            }
+          } else if (_resizeMode == 'right') {
+            final newDur = _initialDuration + delta;
+            if (newDur.inSeconds > 1) item.duration = newDur;
+          } else if (_resizeMode == 'move') {
+            final newStart = _initialStartTime + delta;
+            if (newStart >= Duration.zero &&
+                newStart + Duration(seconds: item.duration.inSeconds) <=
+                    Duration(seconds: _totalDuration.toInt() + 10)) {
+              item.startTime = newStart;
+            }
+          }
+          _updateTotalDuration();
+        });
+      },
+      onTap: () => setState(() => selectedClip = int.tryParse(item.id)),
+      child: Container(
+        width: width,
+        height: height,
+        margin: const EdgeInsets.only(right: 4),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+            color: isSel ? const Color(0xFF8B5CF6) : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        child: Stack(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: Center(child: inner),
+            ),
+            if (isSel) ...[
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                child: _resizeHandle(isLeft: true),
+              ),
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: _resizeHandle(isLeft: false),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+
   // ────── BUILD ──────
   @override
   Widget build(BuildContext context) {
     final clipAtHead = getClipAtPlayhead();
-    final showSplit = clipAtHead != null && !isPlaying;
+    final showSplit =
+        clipAtHead != null &&
+            !isPlaying &&
+            clipAtHead.type == TimelineItemType.video;
+
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
       body: SafeArea(
@@ -433,60 +780,23 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
               Icon(Icons.help_outline, size: 22),
             ],
           ),
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2A),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    Icon(Icons.diamond, size: 12, color: Color(0xFF00D9FF)),
-                    SizedBox(width: 4),
-                    Text('free', style: TextStyle(fontSize: 11)),
-                  ],
+          GestureDetector(
+            onTap: () => _showMessage('Exporting...'),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00D9FF),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Text(
+                'Export',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
                 ),
               ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2A),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    Text('1080P', style: TextStyle(fontSize: 11)),
-                    SizedBox(width: 4),
-                    Icon(Icons.arrow_drop_down, size: 16),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () => _showMessage('Exporting...'),
-                child: Container(
-                  padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00D9FF),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text(
-                    'Export',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       ),
@@ -522,16 +832,18 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.video_library,
-                                size: 60, color: Colors.white24),
+                            const Icon(
+                              Icons.video_library,
+                              size: 60,
+                              color: Colors.white24,
+                            ),
                             const SizedBox(height: 8),
                             Text(
-                              clips.isEmpty
-                                  ? 'Add a video to start editing'
-                                  : 'Video Preview',
+                              clips.isEmpty ? 'Add media to start' : 'Preview',
                               style: const TextStyle(
-                                  color: Colors.white54, fontSize: 14),
-                              textAlign: TextAlign.center,
+                                color: Colors.white54,
+                                fontSize: 14,
+                              ),
                             ),
                           ],
                         ),
@@ -563,20 +875,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                 color: item.textColor ?? Colors.white,
                 fontSize: item.fontSize ?? 32,
                 fontWeight: FontWeight.bold,
-                shadows: [
-                  Shadow(
-                    offset: const Offset(1, 1),
-                    blurRadius: 3,
-                    color: Colors.black.withOpacity(0.5),
-                  ),
-                ],
               ),
             ),
           ),
         );
         if (selectedClip == int.tryParse(item.id)) {
           child = GestureDetector(
-            onPanUpdate: (d) => setState(() {
+            onPanUpdate:
+                (d) => setState(() {
               item.x = (item.x ?? 0) + d.delta.dx;
               item.y = (item.y ?? 0) + d.delta.dy;
             }),
@@ -584,25 +890,21 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
               _initialRotation = item.rotation;
               _initialScale = item.scale;
             },
-            onScaleUpdate: (d) => setState(() {
+            onScaleUpdate:
+                (d) => setState(() {
               item.rotation = _initialRotation + d.rotation * 180 / math.pi;
               item.scale = (_initialScale * d.scale).clamp(0.5, 3.0);
             }),
             child: Container(
               decoration: BoxDecoration(
-                border:
-                Border.all(color: const Color(0xFF00D9FF), width: 2),
+                border: Border.all(color: const Color(0xFF00D9FF), width: 2),
               ),
               child: child,
             ),
           );
         }
         list.add(
-          Positioned(
-            left: item.x ?? 100,
-            top: item.y ?? 200,
-            child: child,
-          ),
+          Positioned(left: item.x ?? 100, top: item.y ?? 200, child: child),
         );
       }
     }
@@ -629,7 +931,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         );
         if (selectedClip == int.tryParse(item.id)) {
           child = GestureDetector(
-            onPanUpdate: (d) => setState(() {
+            onPanUpdate:
+                (d) => setState(() {
               item.x = (item.x ?? 0) + d.delta.dx;
               item.y = (item.y ?? 0) + d.delta.dy;
             }),
@@ -637,25 +940,21 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
               _initialRotation = item.rotation;
               _initialScale = item.scale;
             },
-            onScaleUpdate: (d) => setState(() {
+            onScaleUpdate:
+                (d) => setState(() {
               item.rotation = _initialRotation + d.rotation * 180 / math.pi;
               item.scale = (_initialScale * d.scale).clamp(0.3, 2.0);
             }),
             child: Container(
               decoration: BoxDecoration(
-                border:
-                Border.all(color: const Color(0xFF00D9FF), width: 2),
+                border: Border.all(color: const Color(0xFF00D9FF), width: 2),
               ),
               child: child,
             ),
           );
         }
         list.add(
-          Positioned(
-            left: item.x ?? 50,
-            top: item.y ?? 100,
-            child: child,
-          ),
+          Positioned(left: item.x ?? 50, top: item.y ?? 100, child: child),
         );
       }
     }
@@ -685,8 +984,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                   color: const Color(0xFF2A2A2A),
                   borderRadius: BorderRadius.circular(6),
                 ),
-                child: const Text('ON',
-                    style: TextStyle(fontSize: 11, color: Colors.white)),
+                child: const Text(
+                  'ON',
+                  style: TextStyle(fontSize: 11, color: Colors.white),
+                ),
               ),
               const SizedBox(width: 16),
               const Icon(Icons.rotate_left, size: 20),
@@ -701,301 +1002,291 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   // ────── TIME DISPLAY ──────
   Widget _buildTimeDisplay() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: const Color(0xFF0A0A0A),
-      child: Row(
-        children: [
-          Text(
-            _formatTime(playheadPosition.inMilliseconds / 1000),
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-          ),
-          const Text(' / ',
-              style: TextStyle(fontSize: 14, color: Color(0xFF666666))),
-          Text(
-            _formatTime(totalDuration),
-            style: const TextStyle(fontSize: 14, color: Color(0xFF999999)),
-          ),
-        ],
-      ),
+    return Row(
+      children: [
+        Text(
+          _formatTime(playheadPosition.inSeconds.toDouble()),
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        ),
+        const Text(
+          ' / ',
+          style: TextStyle(fontSize: 14, color: Color(0xFF666666)),
+        ),
+        Text(
+          _formatTime(_totalDuration),
+          style: const TextStyle(fontSize: 14, color: Color(0xFF999999)),
+        ),
+      ],
     );
   }
 
   // ────── TIMELINE ──────
   Widget _buildTimeline(bool showSplit) {
+    const double leftPanelWidth = 180.0;
+    final double playheadX =
+        playheadPosition.inSeconds.toDouble() * pixelsPerSecond;
+
     return Container(
       height: 140,
       color: const Color(0xFF0A0A0A),
-      child: Column(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
+          // Left panel
+          Container(
+            width: leftPanelWidth,
+            color: const Color(0xFF1A1A1A),
             child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // ---- left panel (Mute + Cover) ----
-                Container(
-                  width: 180,
-                  color: const Color(0xFF1A1A1A),
-                  child: Row(
-                    children: [
-                      _buildMuteButton(),
-                      const SizedBox(height: 2),
-                      _buildCoverButton(),
-                    ],
-                  ),
-                ),
-                // ---- scrollable tracks ----
-                Expanded(
-                  child: SingleChildScrollView(
-                    controller: timelineScrollController,
-                    scrollDirection: Axis.horizontal,
-                    child: GestureDetector(
-                      onTapDown: (d) => handleTimelineClick(d.localPosition.dx),
-                      child: Stack(
-                        children: [
-                          // ---- video + audio tracks container ----
-                          Container(
-                            padding: const EdgeInsets.only(
-                                left: 8, right: 8, top: 4),
-                            child: Column(
-                              children: [
-                                // ---- video track ----
-                                SizedBox(
-                                  height: 60,
-                                  child: Row(
-                                    children: [
-                                      ...clips.map(_buildVideoClip).toList(),
-                                      _buildAddClipButton(),
-                                    ],
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [_buildMuteButton(), _buildCoverButton()],
+            ),
+          ),
+          // Scrollable tracks
+          Expanded(
+            child: SingleChildScrollView(
+              controller: timelineScrollController,
+              scrollDirection: Axis.horizontal,
+              child: GestureDetector(
+                onTapDown: (d) => handleTimelineClick(d.localPosition.dx),
+                child: Stack(
+                  children: [
+                    // Tracks
+                    Column(
+                      children: [
+                        // Video
+                        Container(
+                          height: 60,
+                          padding: const EdgeInsets.only(left: 8, right: 8),
+                          child: Stack(
+                            children: [
+                              ...clips.map(
+                                    (c) => Positioned(
+                                  left: c.startTime.inSeconds * pixelsPerSecond,
+                                  child: _buildClipWidget(
+                                    c,
+                                    TimelineItemType.video,
                                   ),
                                 ),
-                                const SizedBox(height: 8),
-                                // ---- audio track ----
-                                _buildAudioTrack(),
+                              ),
+                              Positioned(
+                                right: 0,
+                                child: _buildAddClipButton(),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        // Audio
+                        Container(
+                          height: 30,
+                          padding: const EdgeInsets.only(left: 8, right: 8),
+                          child: Stack(
+                            children: [
+                              ...audioItems.map(
+                                    (a) => Positioned(
+                                  left: a.startTime.inSeconds * pixelsPerSecond,
+                                  child: _buildClipWidget(
+                                    a,
+                                    TimelineItemType.audio,
+                                  ),
+                                ),
+                              ),
+                              if (audioItems.isEmpty)
+                                 Positioned(
+                                  left: 0,
+                                  child: _buildAudioPlaceholder(),
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        // Overlay (images + text)
+                        Container(
+                          height: 30,
+                          padding: const EdgeInsets.only(left: 8, right: 8),
+                          child: Stack(
+                            children: [
+                              ...overlayItems.map(
+                                    (o) => Positioned(
+                                  left: o.startTime.inSeconds * pixelsPerSecond,
+                                  child: _buildClipWidget(
+                                    o,
+                                    TimelineItemType.image,
+                                  ),
+                                ),
+                              ),
+                              ...textItems.map(
+                                    (t) => Positioned(
+                                  left: t.startTime.inSeconds * pixelsPerSecond,
+                                  child: _buildClipWidget(
+                                    t,
+                                    TimelineItemType.text,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    // Playhead
+                    Positioned(
+                      left: playheadX,
+                      top: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        onPanUpdate: (d) {
+                          final deltaSec = d.delta.dx / pixelsPerSecond;
+                          final newPos =
+                              playheadPosition +
+                                  Duration(milliseconds: (deltaSec * 1000).round());
+                          setState(() {
+                            playheadPosition = newPos.clamp(
+                              Duration.zero,
+                              Duration(seconds: _totalDuration.toInt()),
+                            );
+                            selectedClip =
+                            getClipAtPlayhead()?.id != null
+                                ? int.parse(getClipAtPlayhead()!.id)
+                                : null;
+                          });
+                        },
+                        child: Container(
+                          width: 2,
+                          color: const Color(0xFF8B5CF6),
+                          child: const Icon(
+                            Icons.arrow_drop_down,
+                            size: 16,
+                            color: Color(0xFF8B5CF6),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Split button
+                    if (showSplit)
+                      Positioned(
+                        left: playheadX - 40,
+                        top: 20,
+                        child: GestureDetector(
+                          onTap: () {
+                            _saveToHistory();
+                            splitClipAtPlayhead();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF00D9FF),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.content_cut,
+                                  size: 12,
+                                  color: Colors.black,
+                                ),
+                                SizedBox(width: 3),
+                                Text(
+                                  'Split',
+                                  style: TextStyle(
+                                    color: Colors.black,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
-                          // ---- play-head line ----
-                          Positioned(
-                            left: 136 +
-                                (playheadPosition.inMilliseconds / 1000) *
-                                    pixelsPerSecond,
-                            top: 0,
-                            bottom: 0,
-                            child: Container(
-                              width: 2,
-                              color: const Color(0xFF8B5CF6),
-                              child: Column(
-                                children: [
-                                  const SizedBox(height: 8),
-                                  Container(
-                                    width: 16,
-                                    height: 16,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF8B5CF6),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                          color: Colors.white, width: 2),
-                                    ),
-                                    child: const Icon(Icons.lightbulb,
-                                        size: 10, color: Colors.white),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          // ---- split button (only when needed) ----
-                          if (showSplit)
-                            Positioned(
-                              left: 136 +
-                                  (playheadPosition.inMilliseconds / 1000) *
-                                      pixelsPerSecond,
-                              top: 20,
-                              child: Transform.translate(
-                                offset: const Offset(-40, 0),
-                                child: GestureDetector(
-                                  onTap: () {
-                                    _saveToHistory();
-                                    splitClipAtPlayhead();
-                                  },
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 5),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF00D9FF),
-                                      borderRadius: BorderRadius.circular(14),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: const Color(0xFF00D9FF)
-                                              .withOpacity(0.3),
-                                          blurRadius: 6,
-                                          spreadRadius: 1,
-                                        ),
-                                      ],
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(Icons.content_cut,
-                                            size: 12, color: Colors.black),
-                                        SizedBox(width: 3),
-                                        Text('Split',
-                                            style: TextStyle(
-                                                color: Colors.black,
-                                                fontSize: 11,
-                                                fontWeight:
-                                                FontWeight.bold)),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
+                        ),
                       ),
-                    ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMuteButton() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Column(
-        children: const [
-          Icon(Icons.volume_up, size: 18, color: Colors.white),
-          SizedBox(width: 2),
-          Text('Sound ON',
-              style: TextStyle(fontSize: 12, color: Colors.white)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCoverButton() {
-    return Container(
-      height: 50,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Column(
-        children: [
-          Container(
-            width: 40,
-            height: 30,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: Colors.white30),
-            ),
-            child: clips.isNotEmpty && clips[0].thumbnailPaths.isNotEmpty
-                ? ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: Image.file(
-                File(clips[0].thumbnailPaths[0]),
-                fit: BoxFit.cover,
               ),
-            )
-                : const Center(
-              child: Icon(Icons.image, size: 16, color: Colors.white30),
             ),
           ),
-          const SizedBox(width: 6),
-          const Text('Cover',
-              style: TextStyle(fontSize: 12, color: Colors.white)),
         ],
       ),
     );
   }
 
-  Widget _buildVideoClip(TimelineItem clip) {
-    final isSel = selectedClip == int.tryParse(clip.id);
-    final width = (clip.duration.inMilliseconds / 1000 * pixelsPerSecond)
-        .clamp(60.0, double.infinity);
-    return GestureDetector(
-      onTap: () => setState(() => selectedClip = int.tryParse(clip.id)),
-      child: Container(
-        width: width,
-        height: 56,
-        margin: const EdgeInsets.only(right: 4),
+  Widget _buildMuteButton() => Column(
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: const [
+      Icon(Icons.volume_up, size: 18, color: Colors.white),
+      Text('ON', style: TextStyle(fontSize: 10, color: Colors.white)),
+    ],
+  );
+
+  Widget _buildCoverButton() => Column(
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      Container(
+        width: 32,
+        height: 24,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(4),
-          border: Border.all(
-            color:
-            isSel ? const Color(0xFF8B5CF6) : Colors.transparent,
-            width: 2,
-          ),
+          border: Border.all(color: Colors.white30),
         ),
-        child: clip.thumbnailPaths.isNotEmpty
+        child:
+        clips.isNotEmpty && clips[0].thumbnailPaths.isNotEmpty
             ? ClipRRect(
           borderRadius: BorderRadius.circular(4),
           child: Image.file(
-            File(clip.thumbnailPaths.first),
+            File(clips[0].thumbnailPaths[0]),
             fit: BoxFit.cover,
           ),
         )
-            : Container(
-          color: const Color(0xFF2A2A2A),
-          child: const Center(
-            child: Icon(Icons.videocam,
-                color: Colors.white54, size: 18),
-          ),
-        ),
+            : const Icon(Icons.image, size: 14, color: Colors.white30),
       ),
-    );
-  }
+      const Text('Cover', style: TextStyle(fontSize: 10, color: Colors.white)),
+    ],
+  );
 
-  Widget _buildAddClipButton() {
-    return GestureDetector(
-      onTap: () {
-        _saveToHistory();
-        _addVideo();
-      },
-      child: Container(
-        width: 50,
-        height: 56,
-        margin: const EdgeInsets.only(left: 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFF2A2A2A),
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: Colors.white12),
-        ),
-        child: const Center(
-          child: Icon(Icons.add, color: Colors.white, size: 24),
-        ),
-      ),
-    );
-  }
 
-  Widget _buildAudioTrack() {
-    return Container(
-      height: 30,
+
+  Widget _buildAddClipButton() => GestureDetector(
+    onTap: () {
+      _saveToHistory();
+      _addMedia(FileType.video);
+    },
+    child: Container(
+      width: 50,
+      height: 56,
+      margin: const EdgeInsets.only(left: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
+        color: const Color(0xFF2A2A2A),
         borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.white12),
       ),
-      child: InkWell(
-        onTap: () {
-          _saveToHistory();
-          _addAudio();
-        },
-        child: const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: [
-              Icon(Icons.audiotrack, size: 16, color: Colors.white54),
-              SizedBox(width: 6),
-              Text('Add Audio',
-                  style: TextStyle(fontSize: 12, color: Colors.white54)),
-            ],
+      child: const Center(
+        child: Icon(Icons.add, color: Colors.white, size: 24),
+      ),
+    ),
+  );
+
+  Widget _buildAudioPlaceholder() => InkWell(
+    onTap: () {
+      _saveToHistory();
+      _addMedia(FileType.audio);
+    },
+    child: const Padding(
+      padding: EdgeInsets.symmetric(horizontal: 12),
+      child: Row(
+        children: [
+          Icon(Icons.audiotrack, size: 16, color: Colors.white54),
+          SizedBox(width: 6),
+          Text(
+            'Add Audio',
+            style: TextStyle(fontSize: 12, color: Colors.white54),
           ),
-        ),
+        ],
       ),
-    );
-  }
+    ),
+  );
 
   // ────── BOTTOM TOOLBAR ──────
   Widget _buildBottomToolbar(bool showSplit) {
@@ -1374,4 +1665,71 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     });
     _showMessage('Deleted');
   }
+}
+
+class _TimelineRulerPainter extends CustomPainter {
+  final double pixelsPerSecond;
+  final double totalDuration;
+
+  _TimelineRulerPainter({
+    required this.pixelsPerSecond,
+    required this.totalDuration,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white24
+      ..strokeWidth = 1;
+
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+    );
+
+    final double width = size.width;
+
+    // Draw second lines and labels
+    for (int sec = 0; sec <= totalDuration; sec++) {
+      final double x = sec * pixelsPerSecond;
+
+      // Long tick (every 1 second)
+      canvas.drawLine(
+        Offset(x, 20),
+        Offset(x, 30),
+        paint..strokeWidth = 1.5,
+      );
+
+      // Short tick (every 0.2s)
+      for (double sub = 0.2; sub < 1.0; sub += 0.2) {
+        final double subX = x + sub * pixelsPerSecond;
+        if (subX < width) {
+          canvas.drawLine(
+            Offset(subX, 25),
+            Offset(subX, 30),
+            paint..strokeWidth = 1,
+          );
+        }
+      }
+
+      // Time label (every 1 second)
+      if (x < width) {
+        final String label = _formatTime(sec.toDouble());
+        textPainter.text = TextSpan(
+          text: label,
+          style: const TextStyle(color: Colors.white70, fontSize: 10),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(x - textPainter.width / 2, 4));
+      }
+    }
+  }
+
+  String _formatTime(double seconds) {
+    final m = (seconds / 60).floor();
+    final s = (seconds % 60).floor();
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

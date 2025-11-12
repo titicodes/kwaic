@@ -27,6 +27,21 @@ class TimelineItem {
   List<Keyframe> keyframes;
   int trackIndex;
 
+  // Keyframe end values
+  double? endX;
+  double? endY;
+  double? endScale;
+  double? endRotation;
+
+  // Crop values
+  double cropLeft = 0.0;
+  double cropTop = 0.0;
+  double cropRight = 0.0;
+  double cropBottom = 0.0;
+
+  // NEW: Layer index for multi-track layering
+  int? layerIndex;
+
   TimelineItem({
     required this.id,
     required this.type,
@@ -50,6 +65,15 @@ class TimelineItem {
     this.waveformData,
     this.keyframes = const [],
     this.trackIndex = 0,
+    this.endX,
+    this.endY,
+    this.endScale,
+    this.endRotation,
+    this.cropLeft = 0.0,
+    this.cropTop = 0.0,
+    this.cropRight = 0.0,
+    this.cropBottom = 0.0,
+    this.layerIndex, // ADD THIS LINE
   })  : trimStart = trimStart ?? Duration.zero,
         trimEnd = trimEnd ?? originalDuration,
         thumbnailPaths = thumbnailPaths ?? [];
@@ -77,6 +101,15 @@ class TimelineItem {
     List<double>? waveformData,
     List<Keyframe>? keyframes,
     int? trackIndex,
+    double? endX,
+    double? endY,
+    double? endScale,
+    double? endRotation,
+    double? cropLeft,
+    double? cropTop,
+    double? cropRight,
+    double? cropBottom,
+    int? layerIndex, // ADD THIS IN copyWith TOO
   }) {
     return TimelineItem(
       id: id ?? this.id,
@@ -101,6 +134,15 @@ class TimelineItem {
       waveformData: waveformData ?? this.waveformData,
       keyframes: keyframes ?? this.keyframes,
       trackIndex: trackIndex ?? this.trackIndex,
+      endX: endX ?? this.endX,
+      endY: endY ?? this.endY,
+      endScale: endScale ?? this.endScale,
+      endRotation: endRotation ?? this.endRotation,
+      cropLeft: cropLeft ?? this.cropLeft,
+      cropTop: cropTop ?? this.cropTop,
+      cropRight: cropRight ?? this.cropRight,
+      cropBottom: cropBottom ?? this.cropBottom,
+      layerIndex: layerIndex ?? this.layerIndex, // COPY IT HERE
     );
   }
 }

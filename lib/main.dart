@@ -3196,27 +3196,67 @@
 // }
 
 import 'package:flutter/material.dart';
+import 'package:kwaic/nes_scr/screen/video_editor_screen.dart';
 
-import 'nes_scr/screen/video_editor_screen.dart';
+import 'nes_scr/screen/home_screen.dart';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'nes_scr/screen/nr.dart';
 
 void main() {
-  runApp(const CapCutApp());
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Set system UI overlay style
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.dark,
+      systemNavigationBarColor: Colors.white,
+      systemNavigationBarIconBrightness: Brightness.dark,
+    ),
+  );
+
+  // Lock orientation to portrait
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
+  runApp(const MyApp());
 }
 
-class CapCutApp extends StatelessWidget {
-  const CapCutApp({Key? key}) : super(key: key);
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'CapCut Clone',
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: Colors.black,
-        primaryColor: const Color(0xFF00D9FF),
-      ),
-      home: const VideoEditorScreen(),
       debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF9333EA),
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: Colors.white,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          elevation: 0,
+          iconTheme: IconThemeData(color: Colors.black),
+        ),
+      ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF9333EA),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: Colors.black,
+      ),
+      home: const HomeScreen(),
     );
   }
 }
-

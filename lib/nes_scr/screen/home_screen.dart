@@ -1,114 +1,17 @@
-// home_screen.dart
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
-import 'video_editor_screen.dart';
-import 'package:video_player/video_player.dart';
+import 'video_selection_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
-  // home_screen.dart
-  Future<void> _startNewProject(BuildContext context) async {
-    final picker = ImagePicker();
-
-    try {
-      final List<XFile>? pickedFiles = await picker.pickMultipleMedia();
-
-      if (!context.mounted) return;
-
-      if (pickedFiles == null || pickedFiles.isEmpty) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('No files selected')));
-        return;
-      }
-
-      // Filter only video files
-      final videoFiles =
-          pickedFiles.where((f) {
-            final path = f.path.toLowerCase();
-            return path.endsWith('.mp4') ||
-                path.endsWith('.mov') ||
-                path.endsWith('.avi') ||
-                path.endsWith('.mkv') ||
-                path.endsWith('.webm') ||
-                path.endsWith('.m4v') ||
-                path.endsWith('.3gp');
-          }).toList();
-
-      if (!context.mounted) return;
-
-      if (videoFiles.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No video files found. Please select videos.'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
-      }
-
-      // Show loading
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder:
-            (_) => const Center(
-              child: CircularProgressIndicator(color: Color(0xFF8B5CF6)),
-            ),
-      );
-
-      // Initialize controllers
-      final List<Map<String, dynamic>> videosData = [];
-      for (final video in videoFiles) {
-        try {
-          final ctrl = VideoPlayerController.file(File(video.path));
-          await ctrl.initialize();
-          videosData.add({
-            'file': video,
-            'controller': ctrl,
-            'duration': ctrl.value.duration,
-          });
-        } catch (e) {
-          debugPrint('Error initializing video: $e');
-        }
-      }
-
-      if (!context.mounted) return;
-      Navigator.pop(context); // hide loading
-
-      if (videosData.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to load videos'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
-      }
-
-      // Go directly to editor with pre-loaded clips
-      // Remove all the controller pre-initialization (let editor do it properly)
-      Navigator.pop(context); // hide loading dialog
-
-      // Pass only the raw XFile list — this is all we need!
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder:
-              (_) => VideoEditorScreen(
-                initialVideos: videoFiles, // ← Just pass the XFile list!
-              ),
-        ),
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      if (Navigator.canPop(context)) Navigator.pop(context);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error picking videos: $e')));
-    }
+  void _startNewProject(BuildContext context) {
+    // Navigate to video selection screen
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const VideoSelectionScreen(),
+      ),
+    );
   }
 
   @override

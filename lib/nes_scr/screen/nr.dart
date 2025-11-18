@@ -63,8 +63,19 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
   @override
   void initState() {
     super.initState();
-    _lastFrameTime = DateTime.now().millisecondsSinceEpoch;
-    _playbackTicker = createTicker(_playbackFrame); // DO NOT start here
+    _playbackTicker = createTicker(_playbackFrame);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (clips.isNotEmpty && mounted) {
+        playheadPosition = Duration.zero;
+        timelineOffset = 0.0;
+        _updatePreview();           // This is the magic line
+        if (clips.isNotEmpty) {
+          selectedClip = int.parse(clips.first.id);
+        }
+        setState(() {});
+      }
+    });
   }
 
   void togglePlayPause() {

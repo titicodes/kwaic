@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:collection/collection.dart';
 import 'package:ffmpeg_kit_min_gpl/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_min_gpl/return_code.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/gestures.dart';
@@ -35,8 +36,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
   double timelineOffset = 0.0;
   final Map<String, VideoPlayerController> _controllers = {};
   TimelineItem? _activeItem;
-  late Ticker _playbackTicker;
-  int _lastFrameTime = 0;
   double _initialRotation = 0.0;
   double _initialScale = 1.0;
   List<EditorState> history = [];
@@ -59,107 +58,257 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
   String exportResolution = '1080p';
   int exportBitrate = 5000; // kbps
   bool removeWatermark = false; // Pro feature simulation
+  Timer? _playbackTimer;
+  int _lastFrameTime = 0;
+  bool _isInitializing = false;
+  bool _isDisposed = false;
+
 
   @override
   void initState() {
     super.initState();
-    _lastFrameTime = DateTime.now().millisecondsSinceEpoch;
-    _playbackTicker = createTicker(_playbackFrame);
+    _isDisposed = false;
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.initialVideos != null && widget.initialVideos!.isNotEmpty) {
-        _loadInitialVideos(widget.initialVideos!);
-      }
-    });
+    if (widget.initialVideos != null && widget.initialVideos!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _isDisposed) return;
+
+        Future.delayed(const Duration(milliseconds: 200), () {
+          if (!mounted || _isDisposed) return;
+          _loadInitialVideosSequentially();
+        });
+      });
+    }
   }
 
-  Future<void> _loadInitialVideos(List<XFile> videos) async {
-    _showLoading();
-    Duration totalEnd = Duration.zero;
-    List<TimelineItem> newClips = [];
+  Future<void> _loadInitialVideosSequentially() async {
+    if (_isInitializing || _isDisposed) return;
 
-    for (final xfile in videos) {
+    if (mounted) setState(() => _isInitializing = true);
+    _showLoading();
+
+    try {
+      Duration totalEnd = Duration.zero;
+
+      // Load videos ONE AT A TIME to avoid race conditions
+      for (int i = 0; i < widget.initialVideos!.length; i++) {
+        if (_isDisposed || !mounted) break;
+
+        final xfile = widget.initialVideos![i];
+        final file = File(xfile.path);
+
+        if (!await file.exists()) continue;
+
+        final controller = VideoPlayerController.file(file);
+
+        try {
+          await controller.initialize();
+
+          if (_isDisposed || !mounted) {
+            await controller.dispose();
+            break;
+          }
+
+          final duration = controller.value.duration;
+
+          final dir = await getTemporaryDirectory();
+          final thumbnailFutures = List.generate(5, (idx) async {
+            try {
+              final ms = (duration.inMilliseconds * idx / 4).round();
+              return await VideoThumbnail.thumbnailFile(
+                video: xfile.path,
+                thumbnailPath: dir.path,
+                imageFormat: ImageFormat.JPEG,
+                maxWidth: 120,
+                timeMs: ms,
+                quality: 75,
+              );
+            } catch (e) {
+              return null;
+            }
+          });
+
+          final thumbnailPaths = (await Future.wait(thumbnailFutures))
+              .whereType<String>()
+              .toList();
+
+          final item = TimelineItem(
+            id: '${DateTime.now().millisecondsSinceEpoch}_$i',
+            type: TimelineItemType.video,
+            file: file,
+            startTime: totalEnd,
+            duration: duration,
+            originalDuration: duration,
+            trimStart: Duration.zero,
+            trimEnd: duration,
+            thumbnailPaths: thumbnailPaths,
+            volume: 1.0,
+            speed: 1.0,
+          );
+
+          if (_isDisposed || !mounted) {
+            await controller.dispose();
+            break;
+          }
+
+          _controllers[item.id] = controller;
+          clips.add(item);
+          totalEnd += duration;
+
+          if (Platform.isAndroid) {
+            await _forceFirstFrameAndroid(controller);
+          }
+
+        } catch (e) {
+          debugPrint('Failed to initialize video $i: $e');
+          await controller.dispose();
+        }
+      }
+
+      if (!mounted || _isDisposed) return;
+
+      setState(() {
+        clips.sort((a, b) => a.startTime.compareTo(b.startTime));
+
+        if (clips.isNotEmpty) {
+          final first = clips.first;
+          selectedClip = int.tryParse(first.id);
+          _activeVideoController = _controllers[first.id];
+          _activeItem = first;
+          playheadPosition = Duration.zero;
+        }
+
+        _isInitializing = false;
+      });
+
+      await Future.delayed(const Duration(milliseconds: 100));
+      if (mounted && !_isDisposed) {
+        _updatePreview();
+        _hideLoading();
+        _showMessage('Loaded ${clips.length} video(s)');
+      }
+
+    } catch (e) {
+      if (mounted && !_isDisposed) {
+        setState(() => _isInitializing = false);
+        _hideLoading();
+        _showError('Failed to load videos: $e');
+      }
+    }
+  }
+
+  static Future<_InitialLoadResult> _loadVideosInBackground(List<XFile> videos) async {
+    final Map<String, VideoPlayerController> controllersMap = {};
+    final List<TimelineItem> items = [];
+    Duration totalEnd = Duration.zero;
+
+    for (int i = 0; i < videos.length; i++) {
+      final xfile = videos[i];
       final file = File(xfile.path);
       if (!await file.exists()) continue;
 
       final controller = VideoPlayerController.file(file);
-      try {
-        await controller.initialize();
-        final duration = controller.value.duration;
+      await controller.initialize();
+      final duration = controller.value.duration;
 
-        // Force first frame
-        await controller.seekTo(Duration.zero);
-        if (Platform.isAndroid) {
-          await controller.play();
-          await Future.delayed(const Duration(milliseconds: 100));
-          await controller.pause();
-        }
-
-        final item = TimelineItem(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          type: TimelineItemType.video,
-          file: file,
-          startTime: totalEnd,
-          duration: duration,
-          originalDuration: duration,
-          trimStart: Duration.zero,
-          trimEnd: duration,
-          volume: 1.0,
-          speed: 1.0,
+      // Generate thumbnails in background (same as _addVideo)
+      final dir = await getTemporaryDirectory();
+      final thumbnailFutures = List.generate(5, (idx) async {
+        final ms = (duration.inMilliseconds * idx / 4).round();
+        return await VideoThumbnail.thumbnailFile(
+          video: xfile.path,
+          thumbnailPath: dir.path,
+          imageFormat: ImageFormat.JPEG,
+          maxWidth: 120,
+          timeMs: ms,
+          quality: 75,
         );
+      });
+      final thumbnailPaths = (await Future.wait(thumbnailFutures))
+          .whereType<String>()
+          .toList();
 
-        _controllers[item.id] = controller;
-        newClips.add(item);
-        totalEnd += duration;
-      } catch (e) {
-        debugPrint('Failed to load video: $e');
-        controller.dispose();
-      }
+      final item = TimelineItem(
+        id: DateTime.now().millisecondsSinceEpoch.toString() + i.toString(),
+        type: TimelineItemType.video,
+        file: file,
+        startTime: totalEnd,
+        duration: duration,
+        originalDuration: duration,
+        trimStart: Duration.zero,
+        trimEnd: duration,
+        thumbnailPaths: thumbnailPaths,
+        volume: 1.0,
+        speed: 1.0,
+      );
+
+      controllersMap[item.id] = controller;
+      items.add(item);
+      totalEnd += duration;
     }
 
-    if (!mounted) return;
-
-    setState(() {
-      clips.addAll(newClips);
-      if (clips.isNotEmpty) {
-        final first = clips.first;
-        selectedClip = int.tryParse(first.id);
-        _activeVideoController = _controllers[first.id];
-        //_activePreviewController = _activeVideoController;
-      }
-    });
-
-    _updatePreview();
-    _hideLoading();
-    _showMessage('Loaded ${newClips.length} video(s)');
+    return _InitialLoadResult(items, controllersMap);
   }
+
+
+  Future<void> _forceFirstFrameAndroid(VideoPlayerController controller) async {
+    if (!Platform.isAndroid || !controller.value.isInitialized) return;
+    try {
+      await controller.play().timeout(const Duration(seconds: 2));
+      await Future.delayed(const Duration(milliseconds: 50));
+      await controller.pause();
+      await controller.seekTo(Duration.zero);
+    } catch (e) {
+      debugPrint('First frame kick failed: $e');
+    }
+  }
+
 
   void togglePlayPause() {
     setState(() {
       isPlaying = !isPlaying;
-      final maxDuration = _getTotalDuration();
-      if (isPlaying && playheadPosition.inMilliseconds >= maxDuration * 1000) {
+
+      final totalSec = _getTotalDuration();
+      if (isPlaying && playheadPosition.inMilliseconds >= totalSec * 1000) {
         playheadPosition = Duration.zero;
         timelineOffset = 0.0;
       }
     });
+
     if (isPlaying) {
       _lastFrameTime = DateTime.now().millisecondsSinceEpoch;
-      if (!_playbackTicker.isActive) {
-        _playbackTicker.start();
-      }
+
+      _playbackTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+        if (!mounted) {
+          _playbackTimer?.cancel();
+          return;
+        }
+
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final deltaMs = (now - _lastFrameTime).clamp(0, 100);
+        _lastFrameTime = now;
+
+        setState(() {
+          playheadPosition += Duration(milliseconds: deltaMs);
+
+          final totalSec = _getTotalDuration();
+          if (playheadPosition.inMilliseconds >= totalSec * 1000) {
+            playheadPosition = Duration(seconds: totalSec.toInt());
+            isPlaying = false;
+            _playbackTimer?.cancel();
+          }
+        });
+
+        _updatePreview();
+      });
     } else {
-      if (_playbackTicker.isActive) {
-        _playbackTicker.stop();
-      }
+      _playbackTimer?.cancel();
     }
   }
 
   @override
   void dispose() {
-    _playbackTicker.stop();
-    _playbackTicker.dispose();
-
+    _isDisposed = true;
     // Dispose ALL video controllers
     for (final controller in _controllers.values) {
       controller.pause();
@@ -226,25 +375,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
     }
   }
 
-  void _playbackFrame(Duration elapsed) {
-    if (!mounted || !isPlaying) return;
-
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final deltaMs = (now - _lastFrameTime).clamp(0, 100); // Prevent huge jumps
-    _lastFrameTime = now;
-
-    setState(() {
-      playheadPosition += Duration(milliseconds: deltaMs);
-      final totalSec = _getTotalDuration();
-      if (playheadPosition.inMilliseconds >= totalSec * 1000) {
-        playheadPosition = Duration(seconds: totalSec.toInt());
-        isPlaying = false;
-        _playbackTicker.stop();
-      }
-    });
-
-    _updatePreview();
-  }
 
   double _getTotalDuration() {
     double maxDur = 0.0;
@@ -275,31 +405,39 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
     return maxDur;
   }
 
+
   void _updatePreview() {
-    if (!mounted) return;
+    if (!mounted || _isDisposed) return;
 
     final activeVideo = _findActiveVideo();
-    final activeAudio = _findActiveAudio();
 
-    // Video Preview
+    // ───── VIDEO PREVIEW ─────
     if (activeVideo != null) {
       final controller = _controllers[activeVideo.id];
       if (controller != null && controller.value.isInitialized) {
-        final localTime = (playheadPosition - activeVideo.startTime).clamp(Duration.zero, activeVideo.duration);
-        final seekTo = activeVideo.trimStart + Duration(milliseconds: (localTime.inMilliseconds * activeVideo.speed).round());
+        final localTime = (playheadPosition - activeVideo.startTime)
+            .clamp(Duration.zero, activeVideo.duration);
 
-        final diff = (controller.value.position - seekTo).abs();
-        final shouldSeek = diff > Duration(milliseconds: 180);
+        final seekTo = activeVideo.trimStart +
+            Duration(
+              milliseconds: (localTime.inMilliseconds * activeVideo.speed).round(),
+            );
 
-        if (shouldSeek || (isPlaying && !controller.value.isPlaying)) {
+        // Android: use fire-and-forget fix
+        if (Platform.isAndroid) {
+          _forceAndroidFrameRender(controller, seekTo);
+        } else {
           controller.seekTo(seekTo);
         }
 
         controller.setVolume(activeVideo.volume);
         controller.setPlaybackSpeed(activeVideo.speed);
 
-        if (isPlaying && !controller.value.isPlaying) controller.play();
-        if (!isPlaying && controller.value.isPlaying) controller.pause();
+        if (isPlaying) {
+          if (!controller.value.isPlaying) controller.play();
+        } else {
+          if (controller.value.isPlaying) controller.pause();
+        }
 
         if (_activeVideoController != controller) {
           _activeVideoController?.pause();
@@ -311,19 +449,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       if (mounted) setState(() => _activeVideoController = null);
     }
 
-    // Audio Preview (independent)
+    // ───── AUDIO PREVIEW (unchanged) ─────
     for (final audio in audioItems) {
       final ctrl = _audioControllers[audio.id];
       if (ctrl == null || !ctrl.value.isInitialized) continue;
 
       final effectiveDur = Duration(milliseconds: (audio.duration.inMilliseconds / audio.speed).round());
-      final isActive = playheadPosition >= audio.startTime &&
-          playheadPosition < audio.startTime + effectiveDur;
+      final isActive = playheadPosition >= audio.startTime && playheadPosition < audio.startTime + effectiveDur;
 
       if (isActive) {
         final local = playheadPosition - audio.startTime;
-        final seekTo = audio.trimStart +
-            Duration(milliseconds: (local.inMilliseconds * audio.speed).round());
+        final seekTo = audio.trimStart + Duration(milliseconds: (local.inMilliseconds * audio.speed).round());
 
         if ((ctrl.value.position - seekTo).abs() > const Duration(milliseconds: 200)) {
           ctrl.seekTo(seekTo);
@@ -335,6 +471,41 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
         ctrl.pause();
       }
     }
+  }
+
+// THE REAL 2025 ANDROID BLACK SCREEN FIX (works with video_player ≥0.18)
+  void _forceAndroidFrameRender(VideoPlayerController controller, Duration targetPosition) {
+    if (!Platform.isAndroid || !mounted || !controller.value.isInitialized) return;
+
+    Future.microtask(() async {
+      try {
+        // 1. Double seek (old trick)
+        await controller.seekTo(targetPosition + const Duration(milliseconds: 1));
+        await controller.seekTo(targetPosition);
+
+        // 2. Only force frame if not playing
+        if (controller.value.isPlaying) return;
+
+        // 3. Play → wait → pause (the only method that works in 2025)
+        await controller.play();
+
+        // Poll position until it moves (max 500ms)
+        final startTime = DateTime.now();
+        Duration? pos;
+        do {
+          await Future.delayed(const Duration(milliseconds: 5));
+          pos = controller.value.position;
+          if (DateTime.now().difference(startTime).inMilliseconds > 500) break;
+        } while (pos != null && pos <= targetPosition);
+
+        await controller.pause();
+
+        // Extra redraw delay for some devices
+        await Future.delayed(const Duration(milliseconds: 30));
+      } catch (e) {
+        debugPrint("Android frame render fix failed: $e");
+      }
+    });
   }
 
   TimelineItem? _findActiveVideo() {
@@ -397,71 +568,36 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
   }
 
   Future<void> _addVideo() async {
-    final XFile? file = await _picker.pickVideo(source: ImageSource.gallery);
+    final XFile? file = await _picker.pickVideo(
+      source: ImageSource.gallery,
+      maxDuration: const Duration(minutes: 10),
+    );
     if (file == null) return;
 
     _showLoading();
+
     try {
-      // Initialize controller
-      final tempCtrl = VideoPlayerController.file(File(file.path));
-      await tempCtrl.initialize();
+      final result = await compute(_processVideoInBackground, file.path);
 
-      final duration = tempCtrl.value.duration;
-      final dir = await getTemporaryDirectory();
+      if (!mounted || _isDisposed) {  // ADD THIS CHECK
+        await result.controller.dispose();
+        return;
+      }
 
-      // Generate exactly 5 thumbnails — FAST & PARALLEL (this is the correct way)
-      final thumbnailFutures = List.generate(5, (i) async {
-        final ms = (duration.inMilliseconds * i / 4).round();
-        return await VideoThumbnail.thumbnailFile(
-          video: file.path,
-          thumbnailPath: dir.path,
-          imageFormat: ImageFormat.JPEG,
-          maxWidth: 120,
-          timeMs: ms,
-          quality: 80,
-        );
-      });
-
-      final thumbnailPaths = await Future.wait(thumbnailFutures);
-      final validThumbnails = thumbnailPaths.whereType<String>().toList();
-
-      // Determine where to place the new clip
-      final startTime = clips.isEmpty
-          ? Duration.zero
-          : clips.map((c) => c.startTime + c.duration).reduce((a, b) => a > b ? a : b);
-
-      // Create timeline item
-      final item = TimelineItem(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        type: TimelineItemType.video,
-        file: File(file.path),
-        startTime: startTime,
-        duration: duration,
-        originalDuration: duration,
-        trimStart: Duration.zero,
-        trimEnd: duration,
-        thumbnailPaths: validThumbnails,
-        volume: 1.0,
-        speed: 1.0,
-        cropLeft: 0.0,
-        cropTop: 0.0,
-        cropRight: 0.0,
-        cropBottom: 0.0,
-      );
-
-      // Store controller
-      _controllers[item.id] = tempCtrl;
-      await tempCtrl.setLooping(false);
-
-      // Update UI
       setState(() {
-        clips.add(item);
+        clips.add(result.item);
         clips.sort((a, b) => a.startTime.compareTo(b.startTime));
-        selectedClip = int.parse(item.id);
-        _activeItem = item;
-        playheadPosition = startTime;
-        timelineOffset = startTime.inMilliseconds / 1000 * pixelsPerSecond;
+        selectedClip = int.parse(result.item.id);
+        _activeItem = result.item;
+        playheadPosition = result.item.startTime;
+        timelineOffset = result.item.startTime.inMilliseconds / 1000 * pixelsPerSecond;
       });
+
+      _controllers[result.item.id] = result.controller;
+
+      if (Platform.isAndroid) {
+        unawaited(_forceFirstFrameAndroid(result.controller));
+      }
 
       _updatePreview();
       _hideLoading();
@@ -472,13 +608,70 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
     }
   }
 
+// Background isolate function
+  static Future<_VideoProcessResult> _processVideoInBackground(String path) async {
+    final file = File(path);
+    final controller = VideoPlayerController.file(file);
+
+    // Initialize OFF main thread
+    await controller.initialize();
+    final duration = controller.value.duration;
+
+    final dir = await getTemporaryDirectory();
+
+    // Generate thumbnails in parallel (still off main thread)
+    final thumbnailFutures = List.generate(5, (i) async {
+      final ms = (duration.inMilliseconds * i / 4).round();
+      return await VideoThumbnail.thumbnailFile(
+        video: path,
+        thumbnailPath: dir.path,
+        imageFormat: ImageFormat.JPEG,
+        maxWidth: 120,
+        timeMs: ms,
+        quality: 75,
+      );
+    });
+
+    final thumbnailPaths = (await Future.wait(thumbnailFutures))
+        .whereType<String>()
+        .toList();
+
+    final startTime = Duration.zero; // will be recalculated in UI thread
+
+    final item = TimelineItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: TimelineItemType.video,
+      file: file,
+      startTime: startTime,
+      duration: duration,
+      originalDuration: duration,
+      trimStart: Duration.zero,
+      trimEnd: duration,
+      thumbnailPaths: thumbnailPaths,
+      volume: 1.0,
+      speed: 1.0,
+    );
+
+    if (Platform.isAndroid) {
+      unawaited(controller.play().then((_) async {
+        await Future.delayed(const Duration(milliseconds: 50));
+        await controller.pause();
+        await controller.seekTo(Duration.zero);
+      }).timeout(const Duration(seconds: 2), onTimeout: () {
+        controller.pause();
+      }));
+    }
+
+    return _VideoProcessResult(item, controller);
+  }
+
+
   Future<void> _updateThumbnails(TimelineItem item) async {
     if (item.type != TimelineItemType.video || item.file == null) return;
     final dir = await getTemporaryDirectory();
     final thumbs = <String>[];
     final effectiveDur = item.duration.inMilliseconds;
     for (int i = 0; i < 5; i++) {
-      // Reduced to 5 for performance
       final ms = item.trimStart.inMilliseconds + (effectiveDur * i / 4).round();
       final path = await VideoThumbnail.thumbnailFile(
         video: item.file!.path,
@@ -489,9 +682,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       );
       if (path != null) thumbs.add(path);
     }
-    setState(() {
-      item.thumbnailPaths = thumbs;
-    });
+    if (mounted && !_isDisposed) {  // ADD THIS CHECK
+      setState(() {
+        item.thumbnailPaths = thumbs;
+      });
+    }
   }
 
   Future<void> _addAudio() async {
@@ -599,26 +794,40 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
     });
   }
 
-  void _showLoading() => showDialog(
-    context: context,
-    barrierDismissible: false,
-    builder:
-        (_) => const Center(
+  OverlayEntry? _loadingEntry;
+
+  void _showLoading() {
+    if (!mounted || _loadingEntry != null) return;
+    _loadingEntry = OverlayEntry(
+      builder: (_) => Container(
+        color: Colors.black54,
+        child: const Center(
           child: CircularProgressIndicator(color: Color(0xFF00D9FF)),
         ),
-  );
-
-  void _hideLoading() {
-    if (Navigator.canPop(context)) Navigator.pop(context);
+      ),
+    );
+    Overlay.of(context).insert(_loadingEntry!);
   }
 
-  void _showError(String msg) => ScaffoldMessenger.of(
-    context,
-  ).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
+  void _hideLoading() {
+    _loadingEntry?.remove();
+    _loadingEntry = null;
+  }
 
-  void _showMessage(String msg) => ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text(msg), backgroundColor: const Color(0xFF10B981)),
-  );
+
+  void _showError(String msg) {
+    if (!mounted || _isDisposed) return;  // ADD THIS
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: Colors.red),
+    );
+  }
+
+  void _showMessage(String msg) {
+    if (!mounted || _isDisposed) return;  // ADD THIS
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: const Color(0xFF10B981)),
+    );
+  }
 
   String _formatTime(Duration duration) {
     final totalSeconds = duration.inMilliseconds / 1000.0;
@@ -707,29 +916,70 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       videoFilterChain += ',format=yuv420p,$scale[vout]';
 
       // Audio mixing
-      String audioFilterChain = '';
-      final hasClipAudio = clips.any((c) => c.volume > 0);
-      final hasExtraAudio = extraAudioInput != null;
+      // === REPLACE THE ENTIRE AUDIO SECTION WITH THIS ===
 
-      if (hasExtraAudio && hasClipAudio) {
-        audioFilterChain = '[0:a]$extraAudioInput amix=inputs=2:duration=longest[aout]';
-      } else if (hasExtraAudio) {
-        audioFilterChain = '$extraAudioInput copy[aout]';
-      } else if (hasClipAudio) {
-        audioFilterChain = '[0:a]acopy[aout]';
-      } else {
-        audioFilterChain = 'anullsrc=channel_layout=stereo:sample_rate=44100[aout]';
+      String? musicInput;
+      String musicFilter = '';
+      String audioMixFilter = '';
+
+      if (audioItems.isNotEmpty && audioItems.first.file != null) {
+        inputs.addAll(['-i', audioItems.first.file!.path]);
+        musicInput = '[${clips.length}:a]';
       }
 
-      final filterComplex = hasExtraAudio || hasClipAudio
-          ? '$videoFilterChain;$audioFilterChain'
-          : videoFilterChain.replaceAll('[vout]', '[vout]');
+// Collect all video streams that actually have audio
+      List<String> videoAudioStreams = [];
+      for (int i = 0; i < clips.length; i++) {
+        if (clips[i].volume > 0) {
+          videoAudioStreams.add('[$i:a]');
+        }
+      }
+
+      bool hasVideoAudio = videoAudioStreams.isNotEmpty;
+      bool hasMusic = musicInput != null;
+
+      if (hasVideoAudio && hasMusic) {
+        // First concat all video audios (if multiple)
+        String concatenatedVideoAudio;
+        if (videoAudioStreams.length > 1) {
+          String concatAudio = videoAudioStreams.join() +
+              'concat=n=${videoAudioStreams.length}:v=0:a=1[vid_a]';
+          audioMixFilter += '$concatAudio;';
+          concatenatedVideoAudio = '[vid_a]';
+        } else {
+          concatenatedVideoAudio = videoAudioStreams.first;
+        }
+        audioMixFilter += '$concatenatedVideoAudio$musicInput amix=inputs=2:duration=longest[aout]';
+
+      } else if (hasVideoAudio) {
+        // Only video audio → concat if needed
+        if (videoAudioStreams.length > 1) {
+          audioMixFilter = videoAudioStreams.join() +
+              'concat=n=${videoAudioStreams.length}:v=0:a=1[aout]';
+        } else if (videoAudioStreams.isNotEmpty) {
+          audioMixFilter = '${videoAudioStreams.first}acopy[aout]';
+        } else {
+          audioMixFilter = 'anullsrc=channel_layout=stereo:sample_rate=44100[aout]';
+        }
+
+      } else if (hasMusic) {
+        audioMixFilter = '$musicInput acopy[aout]';
+
+      } else {
+        audioMixFilter = 'anullsrc=channel_layout=stereo:sample_rate=44100[aout]';
+      }
+
+// Final filter_complex
+      String filterComplex = videoFilterChain;
+      if (audioMixFilter.isNotEmpty) {
+        filterComplex += '; $audioMixFilter';
+      }
 
       final command = [
         ...inputs,
         '-filter_complex', filterComplex,
         '-map', '[vout]',
-        if (hasExtraAudio || hasClipAudio) '-map', '[aout]',
+        '-map', '[aout]',
         '-c:v', 'libx264',
         '-preset', 'medium',
         '-crf', '23',
@@ -740,7 +990,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
         '-y',
         outputPath,
       ];
-
       debugPrint('FFmpeg command: ${command.join(' ')}');
 
       final session = await FFmpegKit.execute(command.join(' '));
@@ -766,95 +1015,95 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       context: context,
       builder:
           (context) => AlertDialog(
-            backgroundColor: const Color(0xFF1A1A1A),
-            title: const Text(
-              'Export Settings',
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text(
+          'Export Settings',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: StatefulBuilder(
+          builder: (BuildContext context, StateSetter setState) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButton<String>(
+                  value: exportResolution,
+                  dropdownColor: const Color(0xFF1A1A1A),
+                  style: const TextStyle(color: Colors.white),
+                  items:
+                  ['720p', '1080p', '4K'].map((String value) {
+                    return DropdownMenuItem<String>(
+                      value: value,
+                      child: Text(value),
+                    );
+                  }).toList(),
+                  onChanged: (String? newValue) {
+                    setState(() {
+                      exportResolution = newValue!;
+                    });
+                    this.setState(() {
+                      exportResolution = newValue!;
+                    });
+                  },
+                ),
+                Slider(
+                  value: exportBitrate.toDouble(),
+                  min: 1000,
+                  max: 10000,
+                  divisions: 9,
+                  activeColor: const Color(0xFF00D9FF),
+                  label: '$exportBitrate kbps',
+                  onChanged: (double value) {
+                    setState(() {
+                      exportBitrate = value.round();
+                    });
+                    this.setState(() {
+                      exportBitrate = value.round();
+                    });
+                  },
+                ),
+                CheckboxListTile(
+                  title: const Text(
+                    'Remove Watermark (Pro)',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  value: removeWatermark,
+                  activeColor: const Color(0xFF00D9FF),
+                  onChanged: (bool? value) {
+                    setState(() {
+                      removeWatermark = value ?? false;
+                    });
+                    this.setState(() {
+                      removeWatermark = value ?? false;
+                    });
+                  },
+                ),
+              ],
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text(
+              'Cancel',
               style: TextStyle(color: Colors.white),
             ),
-            content: StatefulBuilder(
-              builder: (BuildContext context, StateSetter setState) {
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    DropdownButton<String>(
-                      value: exportResolution,
-                      dropdownColor: const Color(0xFF1A1A1A),
-                      style: const TextStyle(color: Colors.white),
-                      items:
-                          ['720p', '1080p', '4K'].map((String value) {
-                            return DropdownMenuItem<String>(
-                              value: value,
-                              child: Text(value),
-                            );
-                          }).toList(),
-                      onChanged: (String? newValue) {
-                        setState(() {
-                          exportResolution = newValue!;
-                        });
-                        this.setState(() {
-                          exportResolution = newValue!;
-                        });
-                      },
-                    ),
-                    Slider(
-                      value: exportBitrate.toDouble(),
-                      min: 1000,
-                      max: 10000,
-                      divisions: 9,
-                      activeColor: const Color(0xFF00D9FF),
-                      label: '$exportBitrate kbps',
-                      onChanged: (double value) {
-                        setState(() {
-                          exportBitrate = value.round();
-                        });
-                        this.setState(() {
-                          exportBitrate = value.round();
-                        });
-                      },
-                    ),
-                    CheckboxListTile(
-                      title: const Text(
-                        'Remove Watermark (Pro)',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                      value: removeWatermark,
-                      activeColor: const Color(0xFF00D9FF),
-                      onChanged: (bool? value) {
-                        setState(() {
-                          removeWatermark = value ?? false;
-                        });
-                        this.setState(() {
-                          removeWatermark = value ?? false;
-                        });
-                      },
-                    ),
-                  ],
-                );
-              },
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text(
-                  'Cancel',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                  _exportVideo();
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00D9FF),
-                ),
-                child: const Text(
-                  'Export',
-                  style: TextStyle(color: Colors.black),
-                ),
-              ),
-            ],
           ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _exportVideo();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF00D9FF),
+            ),
+            child: const Text(
+              'Export',
+              style: TextStyle(color: Colors.black),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -978,7 +1227,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
   Widget _buildPreview() {
     final screenSize = MediaQuery.of(context).size;
     final visualItems = [...textItems, ...overlayItems]..sort(
-      (a, b) => (a.layerIndex ?? 999999).compareTo(b.layerIndex ?? 999999),
+          (a, b) => (a.layerIndex ?? 999999).compareTo(b.layerIndex ?? 999999),
     );
     Widget videoWidget;
     if (_activeVideoController != null &&
@@ -1058,7 +1307,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
           child: child,
         );
       case 'Glitch':
-        // Simple glitch simulation using overlay color shifts
+      // Simple glitch simulation using overlay color shifts
         return Stack(
           children: [
             child,
@@ -1088,16 +1337,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
             ),
           ],
         );
-      // Add more effects as needed
+    // Add more effects as needed
       default:
         return child;
     }
   }
 
   List<Widget> _buildVisualOverlays(
-    Size screenSize,
-    List<TimelineItem> visualItems,
-  ) {
+      Size screenSize,
+      List<TimelineItem> visualItems,
+      ) {
     final List<Widget> list = [];
     for (final item in visualItems) {
       if (playheadPosition >= item.startTime &&
@@ -1110,31 +1359,31 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
         double currRotation = item.rotation;
         if (item.endX != null) {
           double fraction = ((playheadPosition - item.startTime)
-                      .inMilliseconds /
-                  item.duration.inMilliseconds)
+              .inMilliseconds /
+              item.duration.inMilliseconds)
               .clamp(0.0, 1.0);
           currX =
               (item.x ?? currX) + fraction * (item.endX! - (item.x ?? currX));
         }
         if (item.endY != null) {
           double fraction = ((playheadPosition - item.startTime)
-                      .inMilliseconds /
-                  item.duration.inMilliseconds)
+              .inMilliseconds /
+              item.duration.inMilliseconds)
               .clamp(0.0, 1.0);
           currY =
               (item.y ?? currY) + fraction * (item.endY! - (item.y ?? currY));
         }
         if (item.endScale != null) {
           double fraction = ((playheadPosition - item.startTime)
-                      .inMilliseconds /
-                  item.duration.inMilliseconds)
+              .inMilliseconds /
+              item.duration.inMilliseconds)
               .clamp(0.0, 1.0);
           currScale = item.scale + fraction * (item.endScale! - item.scale);
         }
         if (item.endRotation != null) {
           double fraction = ((playheadPosition - item.startTime)
-                      .inMilliseconds /
-                  item.duration.inMilliseconds)
+              .inMilliseconds /
+              item.duration.inMilliseconds)
               .clamp(0.0, 1.0);
           currRotation =
               item.rotation + fraction * (item.endRotation! - item.rotation);
@@ -1169,17 +1418,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
             child: Transform.scale(
               scale: currScale,
               child:
-                  item.file != null
-                      ? Image.file(
-                        item.file!,
-                        width: 200,
-                        height: 200,
-                        fit: BoxFit.contain,
-                        errorBuilder: (context, error, stackTrace) {
-                          return const SizedBox(); // Prevent errors from breaking UI
-                        },
-                      )
-                      : const SizedBox(),
+              item.file != null
+                  ? Image.file(
+                item.file!,
+                width: 200,
+                height: 200,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) {
+                  return const SizedBox(); // Prevent errors from breaking UI
+                },
+              )
+                  : const SizedBox(),
             ),
           );
         }
@@ -1187,7 +1436,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
           child = RawGestureDetector(
             gestures: <Type, GestureRecognizerFactory>{
               ScaleGestureRecognizer: GestureRecognizerFactoryWithHandlers<
-                ScaleGestureRecognizer
+                  ScaleGestureRecognizer
               >(() => ScaleGestureRecognizer(), (instance) {
                 instance
                   ..onStart = (details) {
@@ -1216,25 +1465,25 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   };
               }),
               PanGestureRecognizer:
-                  GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
+              GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
                     () => PanGestureRecognizer(),
                     (instance) {
-                      instance.onUpdate = (details) {
-                        setState(() {
-                          item.x = (item.x ?? 0) + details.delta.dx;
-                          item.y = (item.y ?? 0) + details.delta.dy;
-                          item.x = item.x!.clamp(
-                            0.0,
-                            screenSize.width - 200 * item.scale,
-                          );
-                          item.y = item.y!.clamp(
-                            0.0,
-                            screenSize.height - 200 * item.scale,
-                          );
-                        });
-                      };
-                    },
-                  ),
+                  instance.onUpdate = (details) {
+                    setState(() {
+                      item.x = (item.x ?? 0) + details.delta.dx;
+                      item.y = (item.y ?? 0) + details.delta.dy;
+                      item.x = item.x!.clamp(
+                        0.0,
+                        screenSize.width - 200 * item.scale,
+                      );
+                      item.y = item.y!.clamp(
+                        0.0,
+                        screenSize.height - 200 * item.scale,
+                      );
+                    });
+                  };
+                },
+              ),
             },
             child: Container(
               decoration: BoxDecoration(
@@ -1251,16 +1500,26 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
   }
 
   Widget _buildCroppedVideoPlayer(
-    VideoPlayerController controller,
-    TimelineItem item,
-  ) {
+      VideoPlayerController controller,
+      TimelineItem item,
+      ) {
     final videoSize = controller.value.size;
     final cropLeft = item.cropLeft;
     final cropTop = item.cropTop;
     final cropRight = item.cropRight;
     final cropBottom = item.cropBottom;
     if (cropLeft + cropRight >= 1 || cropTop + cropBottom >= 1) {
-      return VideoPlayer(controller);
+      return AspectRatio(
+        aspectRatio: controller.value.aspectRatio,
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: controller.value.size.width,
+            height: controller.value.size.height,
+            child: VideoPlayer(controller),
+          ),
+        ),
+      );
     }
     final cropFactorX = 1 - cropLeft - cropRight;
     final cropFactorY = 1 - cropTop - cropBottom;
@@ -1288,7 +1547,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
         '${_formatTime(playheadPosition)} / ${_formatTime(Duration(seconds: _getTotalDuration().toInt()))}';
     if (selectedItem != null) {
       timeText =
-          '${_formatTime(selectedItem.startTime)} / ${_formatTime(selectedItem.startTime + selectedItem.duration)}';
+      '${_formatTime(selectedItem.startTime)} / ${_formatTime(selectedItem.startTime + selectedItem.duration)}';
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1434,7 +1693,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
     final screenWidth = MediaQuery.of(context).size.width;
     final selectedItem = getSelectedItem();
     final durationText =
-        selectedItem != null ? _formatTime(selectedItem.duration) : '';
+    selectedItem != null ? _formatTime(selectedItem.duration) : '';
     return Positioned(
       left: screenWidth / 2 - 1,
       top: 0,
@@ -1498,11 +1757,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
     final centreSecond = timelineOffset / pixelsPerSecond;
     final halfScreenSec = visibleSec / 2;
     double step =
-        pixelsPerSecond > 150
-            ? 0.1
-            : pixelsPerSecond > 80
-            ? 0.5
-            : 1.0;
+    pixelsPerSecond > 150
+        ? 0.1
+        : pixelsPerSecond > 80
+        ? 0.5
+        : 1.0;
     double start = (centreSecond - halfScreenSec).floorToDouble();
     double end = (centreSecond + halfScreenSec).ceilToDouble();
     List<Widget> ticks = [];
@@ -1577,7 +1836,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                               _sideButton(
                                 Icons.volume_off,
                                 'Sound\nOn',
-                                () => _showMessage('Mute'),
+                                    () => _showMessage('Mute'),
                               ),
                               const SizedBox(width: 8),
                               _buildCoverButton(),
@@ -1625,7 +1884,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               final deltaSec = d.delta.dx / pixelsPerSecond;
               final newStart =
                   item.startTime +
-                  Duration(milliseconds: (deltaSec * 1000).round());
+                      Duration(milliseconds: (deltaSec * 1000).round());
               if (newStart >= Duration.zero) {
                 setState(() {
                   item.startTime = newStart;
@@ -1647,34 +1906,34 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(6),
                 child:
-                    item.thumbnailPaths.isNotEmpty
-                        ? Row(
-                          children:
-                              item.thumbnailPaths
-                                  .map(
-                                    (p) => Expanded(
-                                      child: Image.file(
-                                        File(p),
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (
-                                          context,
-                                          error,
-                                          stackTrace,
-                                        ) {
-                                          return const SizedBox(); // Prevent errors
-                                        },
-                                      ),
-                                    ),
-                                  )
-                                  .toList(),
-                        )
-                        : Container(
-                          color: const Color(0xFF2A2A2A),
-                          child: const Icon(
-                            Icons.videocam,
-                            color: Colors.white54,
-                          ),
-                        ),
+                item.thumbnailPaths.isNotEmpty
+                    ? Row(
+                  children:
+                  item.thumbnailPaths
+                      .map(
+                        (p) => Expanded(
+                      child: Image.file(
+                        File(p),
+                        fit: BoxFit.cover,
+                        errorBuilder: (
+                            context,
+                            error,
+                            stackTrace,
+                            ) {
+                          return const SizedBox(); // Prevent errors
+                        },
+                      ),
+                    ),
+                  )
+                      .toList(),
+                )
+                    : Container(
+                  color: const Color(0xFF2A2A2A),
+                  child: const Icon(
+                    Icons.videocam,
+                    color: Colors.white54,
+                  ),
+                ),
               ),
             ),
           ),
@@ -1688,13 +1947,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   final newStart =
                       item.startTime +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   final newTrimStart =
                       item.trimStart -
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   final newDuration =
                       item.duration -
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newStart >= Duration.zero &&
                       newDuration >= minDuration &&
                       newTrimStart >= Duration.zero &&
@@ -1721,10 +1980,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   final newTrimEnd =
                       item.trimEnd +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   Duration newDuration =
                       item.duration +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newTrimEnd <= item.originalDuration &&
                       newDuration >= minDuration) {
                     setState(() {
@@ -1890,7 +2149,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                         ),
                       ),
                       ...audioItems.map(
-                        (audio) => _buildAudioClip(audio, centerX),
+                            (audio) => _buildAudioClip(audio, centerX),
                       ),
                     ],
                   ),
@@ -1919,7 +2178,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               final deltaSec = d.delta.dx / pixelsPerSecond;
               final newStart =
                   item.startTime +
-                  Duration(milliseconds: (deltaSec * 1000).round());
+                      Duration(milliseconds: (deltaSec * 1000).round());
               if (newStart >= Duration.zero) {
                 setState(() {
                   item.startTime = newStart;
@@ -1942,17 +2201,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(6),
                 child:
-                    item.waveformData != null && item.waveformData!.isNotEmpty
-                        ? CustomPaint(
-                          painter: WaveformPainter(item.waveformData!),
-                        )
-                        : const Center(
-                          child: Icon(
-                            Icons.audiotrack,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
+                item.waveformData != null && item.waveformData!.isNotEmpty
+                    ? CustomPaint(
+                  painter: WaveformPainter(item.waveformData!),
+                )
+                    : const Center(
+                  child: Icon(
+                    Icons.audiotrack,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
               ),
             ),
           ),
@@ -1966,13 +2225,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   final newStart =
                       item.startTime +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   final newTrimStart =
                       item.trimStart -
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   final newDuration =
                       item.duration -
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newStart >= Duration.zero &&
                       newDuration >= minDuration &&
                       newTrimStart >= Duration.zero &&
@@ -1982,7 +2241,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                       item.trimStart = newTrimStart;
                       item.duration = newDuration;
                       audioItems.sort(
-                        (a, b) => a.startTime.compareTo(b.startTime),
+                            (a, b) => a.startTime.compareTo(b.startTime),
                       );
                     });
                   }
@@ -2000,17 +2259,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   final newTrimEnd =
                       item.trimEnd +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   Duration newDuration =
                       item.duration +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newTrimEnd <= item.originalDuration &&
                       newDuration >= minDuration) {
                     setState(() {
                       item.trimEnd = newTrimEnd;
                       item.duration = newDuration;
                       audioItems.sort(
-                        (a, b) => a.startTime.compareTo(b.startTime),
+                            (a, b) => a.startTime.compareTo(b.startTime),
                       );
                     });
                   }
@@ -2080,7 +2339,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                         ),
                       ),
                       ...overlayItems.map(
-                        (overlay) => _buildOverlayClip(overlay, centerX),
+                            (overlay) => _buildOverlayClip(overlay, centerX),
                       ),
                     ],
                   ),
@@ -2099,8 +2358,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
         item.startTime.inMilliseconds / 1000 * pixelsPerSecond - timelineOffset;
     final width =
         item.duration.inMilliseconds /
-        1000 *
-        pixelsPerSecond.clamp(60.0, double.infinity);
+            1000 *
+            pixelsPerSecond.clamp(60.0, double.infinity);
     final minDuration = const Duration(seconds: 1);
     return Positioned(
       left: startX + centerX,
@@ -2112,12 +2371,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               final deltaSec = d.delta.dx / pixelsPerSecond;
               final newStart =
                   item.startTime +
-                  Duration(milliseconds: (deltaSec * 1000).round());
+                      Duration(milliseconds: (deltaSec * 1000).round());
               if (newStart >= Duration.zero) {
                 setState(() {
                   item.startTime = newStart;
                   overlayItems.sort(
-                    (a, b) => a.startTime.compareTo(b.startTime),
+                        (a, b) => a.startTime.compareTo(b.startTime),
                   );
                 });
               }
@@ -2136,16 +2395,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               ),
               child: Center(
                 child:
-                    item.file != null
-                        ? Image.file(item.file!, fit: BoxFit.cover)
-                        : const Text(
-                          'Image',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
+                item.file != null
+                    ? Image.file(item.file!, fit: BoxFit.cover)
+                    : const Text(
+                  'Image',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ),
             ),
           ),
@@ -2159,16 +2418,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   final newStart =
                       item.startTime +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   final newDuration =
                       item.duration -
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newStart >= Duration.zero && newDuration >= minDuration) {
                     setState(() {
                       item.startTime = newStart;
                       item.duration = newDuration;
                       overlayItems.sort(
-                        (a, b) => a.startTime.compareTo(b.startTime),
+                            (a, b) => a.startTime.compareTo(b.startTime),
                       );
                     });
                   }
@@ -2186,7 +2445,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   Duration newDuration =
                       item.duration +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newDuration >= minDuration) {
                     Duration snapDur = Duration.zero;
                     for (var c in clips) {
@@ -2197,7 +2456,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                     }
                     if (snapDur > Duration.zero) {
                       final delta =
-                          (newDuration - snapDur).inMilliseconds.abs();
+                      (newDuration - snapDur).inMilliseconds.abs();
                       if (delta < 500) {
                         newDuration = snapDur;
                       }
@@ -2205,7 +2464,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                     setState(() {
                       item.duration = newDuration;
                       overlayItems.sort(
-                        (a, b) => a.startTime.compareTo(b.startTime),
+                            (a, b) => a.startTime.compareTo(b.startTime),
                       );
                     });
                   }
@@ -2292,8 +2551,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
         item.startTime.inMilliseconds / 1000 * pixelsPerSecond - timelineOffset;
     final width =
         item.duration.inMilliseconds /
-        1000 *
-        pixelsPerSecond.clamp(60.0, double.infinity);
+            1000 *
+            pixelsPerSecond.clamp(60.0, double.infinity);
     final minDuration = const Duration(seconds: 1);
     return Positioned(
       left: startX + centerX,
@@ -2305,7 +2564,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
               final deltaSec = d.delta.dx / pixelsPerSecond;
               final newStart =
                   item.startTime +
-                  Duration(milliseconds: (deltaSec * 1000).round());
+                      Duration(milliseconds: (deltaSec * 1000).round());
               if (newStart >= Duration.zero) {
                 setState(() {
                   item.startTime = newStart;
@@ -2349,16 +2608,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   final newStart =
                       item.startTime +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   final newDuration =
                       item.duration -
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newStart >= Duration.zero && newDuration >= minDuration) {
                     setState(() {
                       item.startTime = newStart;
                       item.duration = newDuration;
                       textItems.sort(
-                        (a, b) => a.startTime.compareTo(b.startTime),
+                            (a, b) => a.startTime.compareTo(b.startTime),
                       );
                     });
                   }
@@ -2376,12 +2635,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
                   final deltaSec = d.delta.dx / pixelsPerSecond;
                   Duration newDuration =
                       item.duration +
-                      Duration(milliseconds: (deltaSec * 1000).round());
+                          Duration(milliseconds: (deltaSec * 1000).round());
                   if (newDuration >= minDuration) {
                     setState(() {
                       item.duration = newDuration;
                       textItems.sort(
-                        (a, b) => a.startTime.compareTo(b.startTime),
+                            (a, b) => a.startTime.compareTo(b.startTime),
                       );
                     });
                   }
@@ -2451,7 +2710,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
             _navBtn(
               Icons.person_remove,
               'Remove BG',
-              () => _showBackgroundRemoval(),
+                  () => _showBackgroundRemoval(),
             ),
           ],
         ),
@@ -2472,99 +2731,99 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (context) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 500,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Layer Manager',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Drag to reorder layers • Lower = behind',
-                        style: TextStyle(color: Colors.white54, fontSize: 12),
-                      ),
-                      const SizedBox(height: 16),
-                      Expanded(
-                        child: ReorderableListView(
-                          onReorder: (oldIndex, newIndex) {
-                            setM(() {
-                              if (newIndex > oldIndex) newIndex--;
-                              final item = visualItems.removeAt(oldIndex);
-                              visualItems.insert(newIndex, item);
-                              // Reassign layerIndex: 0, 10, 20, ... (lower = drawn first = behind)
-                              for (int i = 0; i < visualItems.length; i++) {
-                                visualItems[i].layerIndex = i * 10;
-                              }
-                            });
-                            // Sync back to original lists
-                            setState(() {
-                              textItems =
-                                  visualItems
-                                      .where(
-                                        (e) => e.type == TimelineItemType.text,
-                                      )
-                                      .toList();
-                              overlayItems =
-                                  visualItems
-                                      .where(
-                                        (e) => e.type != TimelineItemType.text,
-                                      )
-                                      .toList();
-                            });
-                          },
-                          children:
-                              visualItems.map((item) {
-                                return ListTile(
-                                  key: ValueKey(item.id),
-                                  leading: Icon(
-                                    item.type == TimelineItemType.text
-                                        ? Icons.text_fields
-                                        : Icons.image,
-                                    color: Colors.white,
-                                  ),
-                                  title: Text(
-                                    item.type == TimelineItemType.text
-                                        ? (item.text?.isNotEmpty == true
-                                            ? item.text!
-                                            : 'Text')
-                                        : 'Image',
-                                    style: const TextStyle(color: Colors.white),
-                                  ),
-                                  subtitle:
-                                      item.layerIndex != null
-                                          ? Text(
-                                            'Layer ${item.layerIndex! ~/ 10}',
-                                            style: const TextStyle(
-                                              color: Colors.white38,
-                                              fontSize: 11,
-                                            ),
-                                          )
-                                          : null,
-                                  trailing: const Icon(
-                                    Icons.drag_handle,
-                                    color: Colors.white,
-                                  ),
-                                  tileColor: const Color(0xFF2A2A2A),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                );
-                              }).toList(),
-                        ),
-                      ),
-                    ],
-                  ),
+        builder:
+            (ctx, setM) => Container(
+          height: 500,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Layer Manager',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
                 ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Drag to reorder layers • Lower = behind',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: ReorderableListView(
+                  onReorder: (oldIndex, newIndex) {
+                    setM(() {
+                      if (newIndex > oldIndex) newIndex--;
+                      final item = visualItems.removeAt(oldIndex);
+                      visualItems.insert(newIndex, item);
+                      // Reassign layerIndex: 0, 10, 20, ... (lower = drawn first = behind)
+                      for (int i = 0; i < visualItems.length; i++) {
+                        visualItems[i].layerIndex = i * 10;
+                      }
+                    });
+                    // Sync back to original lists
+                    setState(() {
+                      textItems =
+                          visualItems
+                              .where(
+                                (e) => e.type == TimelineItemType.text,
+                          )
+                              .toList();
+                      overlayItems =
+                          visualItems
+                              .where(
+                                (e) => e.type != TimelineItemType.text,
+                          )
+                              .toList();
+                    });
+                  },
+                  children:
+                  visualItems.map((item) {
+                    return ListTile(
+                      key: ValueKey(item.id),
+                      leading: Icon(
+                        item.type == TimelineItemType.text
+                            ? Icons.text_fields
+                            : Icons.image,
+                        color: Colors.white,
+                      ),
+                      title: Text(
+                        item.type == TimelineItemType.text
+                            ? (item.text?.isNotEmpty == true
+                            ? item.text!
+                            : 'Text')
+                            : 'Image',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      subtitle:
+                      item.layerIndex != null
+                          ? Text(
+                        'Layer ${item.layerIndex! ~/ 10}',
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                        ),
+                      )
+                          : null,
+                      trailing: const Icon(
+                        Icons.drag_handle,
+                        color: Colors.white,
+                      ),
+                      tileColor: const Color(0xFF2A2A2A),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -2591,18 +2850,18 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (context) => Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _editOption(Icons.content_cut, 'Split', splitClipAtPlayhead),
-                _editOption(Icons.volume_up, 'Volume', _showVolumeEditor),
-                _editOption(Icons.speed, 'Speed', _showSpeedEditor),
-                _editOption(Icons.crop, 'Crop', _showCropEditor),
-                _editOption(Icons.delete, 'Delete', _deleteSelected),
-              ],
-            ),
-          ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _editOption(Icons.content_cut, 'Split', splitClipAtPlayhead),
+            _editOption(Icons.volume_up, 'Volume', _showVolumeEditor),
+            _editOption(Icons.speed, 'Speed', _showSpeedEditor),
+            _editOption(Icons.crop, 'Crop', _showCropEditor),
+            _editOption(Icons.delete, 'Delete', _deleteSelected),
+          ],
+        ),
+      ),
     );
   }
 
@@ -2632,78 +2891,78 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 400,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Crop Video',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text('Left: ${tempLeft.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempLeft,
-                        min: 0,
-                        max: 0.5,
-                        onChanged: (v) => setM(() => tempLeft = v),
-                      ),
-                      Text('Top: ${tempTop.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempTop,
-                        min: 0,
-                        max: 0.5,
-                        onChanged: (v) => setM(() => tempTop = v),
-                      ),
-                      Text('Right: ${tempRight.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempRight,
-                        min: 0,
-                        max: 0.5,
-                        onChanged: (v) => setM(() => tempRight = v),
-                      ),
-                      Text('Bottom: ${tempBottom.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempBottom,
-                        min: 0,
-                        max: 0.5,
-                        onChanged: (v) => setM(() => tempBottom = v),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            item!.cropLeft = tempLeft;
-                            item.cropTop = tempTop;
-                            item.cropRight = tempRight;
-                            item.cropBottom = tempBottom;
-                          });
-                          Navigator.pop(ctx);
-                          _showMessage('Crop applied');
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00D9FF),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 32,
-                            vertical: 12,
-                          ),
-                        ),
-                        child: const Text(
-                          'Apply',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+        builder:
+            (ctx, setM) => Container(
+          height: 400,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              const Text(
+                'Crop Video',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text('Left: ${tempLeft.toStringAsFixed(2)}'),
+              Slider(
+                value: tempLeft,
+                min: 0,
+                max: 0.5,
+                onChanged: (v) => setM(() => tempLeft = v),
+              ),
+              Text('Top: ${tempTop.toStringAsFixed(2)}'),
+              Slider(
+                value: tempTop,
+                min: 0,
+                max: 0.5,
+                onChanged: (v) => setM(() => tempTop = v),
+              ),
+              Text('Right: ${tempRight.toStringAsFixed(2)}'),
+              Slider(
+                value: tempRight,
+                min: 0,
+                max: 0.5,
+                onChanged: (v) => setM(() => tempRight = v),
+              ),
+              Text('Bottom: ${tempBottom.toStringAsFixed(2)}'),
+              Slider(
+                value: tempBottom,
+                min: 0,
+                max: 0.5,
+                onChanged: (v) => setM(() => tempBottom = v),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    item!.cropLeft = tempLeft;
+                    item.cropTop = tempTop;
+                    item.cropRight = tempRight;
+                    item.cropBottom = tempBottom;
+                  });
+                  Navigator.pop(ctx);
+                  _showMessage('Crop applied');
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D9FF),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 12,
                   ),
                 ),
+                child: const Text(
+                  'Apply',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -2724,80 +2983,80 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 400,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Keyframe Editor (End Values)',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text('End X: ${tempEndX.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempEndX,
-                        min: 0,
-                        max: 500,
-                        onChanged: (v) => setM(() => tempEndX = v),
-                      ),
-                      Text('End Y: ${tempEndY.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempEndY,
-                        min: 0,
-                        max: 500,
-                        onChanged: (v) => setM(() => tempEndY = v),
-                      ),
-                      Text('End Scale: ${tempEndScale.toStringAsFixed(2)}'),
-                      Slider(
-                        value: tempEndScale,
-                        min: 0.5,
-                        max: 3.0,
-                        onChanged: (v) => setM(() => tempEndScale = v),
-                      ),
-                      Text(
-                        'End Rotation: ${tempEndRotation.toStringAsFixed(2)}',
-                      ),
-                      Slider(
-                        value: tempEndRotation,
-                        min: -360,
-                        max: 360,
-                        onChanged: (v) => setM(() => tempEndRotation = v),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            item!.endX = tempEndX;
-                            item.endY = tempEndY;
-                            item.endScale = tempEndScale;
-                            item.endRotation = tempEndRotation;
-                          });
-                          Navigator.pop(ctx);
-                          _showMessage('Keyframe applied');
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00D9FF),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 32,
-                            vertical: 12,
-                          ),
-                        ),
-                        child: const Text(
-                          'Apply',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+        builder:
+            (ctx, setM) => Container(
+          height: 400,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              const Text(
+                'Keyframe Editor (End Values)',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text('End X: ${tempEndX.toStringAsFixed(2)}'),
+              Slider(
+                value: tempEndX,
+                min: 0,
+                max: 500,
+                onChanged: (v) => setM(() => tempEndX = v),
+              ),
+              Text('End Y: ${tempEndY.toStringAsFixed(2)}'),
+              Slider(
+                value: tempEndY,
+                min: 0,
+                max: 500,
+                onChanged: (v) => setM(() => tempEndY = v),
+              ),
+              Text('End Scale: ${tempEndScale.toStringAsFixed(2)}'),
+              Slider(
+                value: tempEndScale,
+                min: 0.5,
+                max: 3.0,
+                onChanged: (v) => setM(() => tempEndScale = v),
+              ),
+              Text(
+                'End Rotation: ${tempEndRotation.toStringAsFixed(2)}',
+              ),
+              Slider(
+                value: tempEndRotation,
+                min: -360,
+                max: 360,
+                onChanged: (v) => setM(() => tempEndRotation = v),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    item!.endX = tempEndX;
+                    item.endY = tempEndY;
+                    item.endScale = tempEndScale;
+                    item.endRotation = tempEndRotation;
+                  });
+                  Navigator.pop(ctx);
+                  _showMessage('Keyframe applied');
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D9FF),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 12,
                   ),
                 ),
+                child: const Text(
+                  'Apply',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -2811,60 +3070,60 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 250,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Volume',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        '${(temp * 100).toInt()}%',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                        ),
-                      ),
-                      Slider(
-                        value: temp,
-                        min: 0,
-                        max: 2,
-                        divisions: 20,
-                        activeColor: const Color(0xFF00D9FF),
-                        onChanged: (v) => setM(() => temp = v),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          setState(() => item!.volume = temp);
-                          Navigator.pop(ctx);
-                          _showMessage('Volume: ${(temp * 100).toInt()}%');
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00D9FF),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 32,
-                            vertical: 12,
-                          ),
-                        ),
-                        child: const Text(
-                          'Apply',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+        builder:
+            (ctx, setM) => Container(
+          height: 250,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              const Text(
+                'Volume',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                '${(temp * 100).toInt()}%',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                ),
+              ),
+              Slider(
+                value: temp,
+                min: 0,
+                max: 2,
+                divisions: 20,
+                activeColor: const Color(0xFF00D9FF),
+                onChanged: (v) => setM(() => temp = v),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() => item!.volume = temp);
+                  Navigator.pop(ctx);
+                  _showMessage('Volume: ${(temp * 100).toInt()}%');
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D9FF),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 12,
                   ),
                 ),
+                child: const Text(
+                  'Apply',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -2878,86 +3137,86 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 300,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Speed',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        '${temp.toStringAsFixed(2)}x',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                        ),
-                      ),
-                      Slider(
-                        value: temp,
-                        min: 0.25,
-                        max: 4,
-                        divisions: 15,
-                        activeColor: const Color(0xFF00D9FF),
-                        onChanged: (v) => setM(() => temp = v),
-                      ),
-                      const SizedBox(height: 16),
-                      Wrap(
-                        spacing: 8,
-                        children:
-                            [0.25, 0.5, 1.0, 2.0, 4.0].map((s) {
-                              return ElevatedButton(
-                                onPressed: () => setM(() => temp = s),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor:
-                                      temp == s
-                                          ? const Color(0xFF00D9FF)
-                                          : const Color(0xFF2A2A2A),
-                                  foregroundColor:
-                                      temp == s ? Colors.black : Colors.white,
-                                ),
-                                child: Text('${s}x'),
-                              );
-                            }).toList(),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          final oldDur = item!.duration;
-                          setState(() {
-                            item.speed = temp;
-                            item.duration = Duration(
-                              milliseconds:
-                                  (oldDur.inMilliseconds / temp).round(),
-                            );
-                          });
-                          Navigator.pop(ctx);
-                          _showMessage('Speed: ${temp.toStringAsFixed(2)}x');
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00D9FF),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 32,
-                            vertical: 12,
-                          ),
-                        ),
-                        child: const Text(
-                          'Apply',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+        builder:
+            (ctx, setM) => Container(
+          height: 300,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              const Text(
+                'Speed',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                '${temp.toStringAsFixed(2)}x',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                ),
+              ),
+              Slider(
+                value: temp,
+                min: 0.25,
+                max: 4,
+                divisions: 15,
+                activeColor: const Color(0xFF00D9FF),
+                onChanged: (v) => setM(() => temp = v),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                children:
+                [0.25, 0.5, 1.0, 2.0, 4.0].map((s) {
+                  return ElevatedButton(
+                    onPressed: () => setM(() => temp = s),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                      temp == s
+                          ? const Color(0xFF00D9FF)
+                          : const Color(0xFF2A2A2A),
+                      foregroundColor:
+                      temp == s ? Colors.black : Colors.white,
+                    ),
+                    child: Text('${s}x'),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  final oldDur = item!.duration;
+                  setState(() {
+                    item.speed = temp;
+                    item.duration = Duration(
+                      milliseconds:
+                      (oldDur.inMilliseconds / temp).round(),
+                    );
+                  });
+                  Navigator.pop(ctx);
+                  _showMessage('Speed: ${temp.toStringAsFixed(2)}x');
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D9FF),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 12,
                   ),
                 ),
+                child: const Text(
+                  'Apply',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -2971,124 +3230,124 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Padding(
-                  padding: EdgeInsets.only(
-                    bottom: MediaQuery.of(context).viewInsets.bottom,
+        builder:
+            (ctx, setM) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: Container(
+            height: 450,
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                const Text(
+                  'Edit Text',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
                   ),
-                  child: Container(
-                    height: 450,
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      children: [
-                        const Text(
-                          'Edit Text',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: ctrl,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: const InputDecoration(
-                            hintText: 'Enter text',
-                            hintStyle: TextStyle(color: Colors.white54),
-                            enabledBorder: UnderlineInputBorder(
-                              borderSide: BorderSide(color: Colors.white54),
-                            ),
-                            focusedBorder: UnderlineInputBorder(
-                              borderSide: BorderSide(color: Color(0xFF00D9FF)),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 20),
-                        const Text(
-                          'Color',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          children:
-                              [
-                                Colors.white,
-                                Colors.red,
-                                Colors.yellow,
-                                Colors.blue,
-                                Colors.green,
-                                Colors.purple,
-                                Colors.orange,
-                                Colors.pink,
-                              ].map((c) {
-                                final sel = c == tempColor;
-                                return GestureDetector(
-                                  onTap: () => setM(() => tempColor = c),
-                                  child: Container(
-                                    width: 40,
-                                    height: 40,
-                                    decoration: BoxDecoration(
-                                      color: c,
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color:
-                                            sel
-                                                ? const Color(0xFF00D9FF)
-                                                : Colors.transparent,
-                                        width: 3,
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                        ),
-                        const SizedBox(height: 20),
-                        const Text(
-                          'Font Size',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        Slider(
-                          value: tempSize,
-                          min: 10,
-                          max: 100,
-                          activeColor: const Color(0xFF00D9FF),
-                          onChanged: (v) => setM(() => tempSize = v),
-                        ),
-                        Text(
-                          '${tempSize.toInt()}',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                        const Spacer(),
-                        ElevatedButton(
-                          onPressed: () {
-                            setState(() {
-                              item.text = ctrl.text;
-                              item.textColor = tempColor;
-                              item.fontSize = tempSize;
-                            });
-                            Navigator.pop(ctx);
-                            _showMessage('Text updated');
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF00D9FF),
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 32,
-                              vertical: 12,
-                            ),
-                          ),
-                          child: const Text(
-                            'Apply',
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                        ),
-                      ],
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: ctrl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: const InputDecoration(
+                    hintText: 'Enter text',
+                    hintStyle: TextStyle(color: Colors.white54),
+                    enabledBorder: UnderlineInputBorder(
+                      borderSide: BorderSide(color: Colors.white54),
+                    ),
+                    focusedBorder: UnderlineInputBorder(
+                      borderSide: BorderSide(color: Color(0xFF00D9FF)),
                     ),
                   ),
                 ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Color',
+                  style: TextStyle(color: Colors.white),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children:
+                  [
+                    Colors.white,
+                    Colors.red,
+                    Colors.yellow,
+                    Colors.blue,
+                    Colors.green,
+                    Colors.purple,
+                    Colors.orange,
+                    Colors.pink,
+                  ].map((c) {
+                    final sel = c == tempColor;
+                    return GestureDetector(
+                      onTap: () => setM(() => tempColor = c),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: c,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color:
+                            sel
+                                ? const Color(0xFF00D9FF)
+                                : Colors.transparent,
+                            width: 3,
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Font Size',
+                  style: TextStyle(color: Colors.white),
+                ),
+                Slider(
+                  value: tempSize,
+                  min: 10,
+                  max: 100,
+                  activeColor: const Color(0xFF00D9FF),
+                  onChanged: (v) => setM(() => tempSize = v),
+                ),
+                Text(
+                  '${tempSize.toInt()}',
+                  style: const TextStyle(color: Colors.white),
+                ),
+                const Spacer(),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      item.text = ctrl.text;
+                      item.textColor = tempColor;
+                      item.fontSize = tempSize;
+                    });
+                    Navigator.pop(ctx);
+                    _showMessage('Text updated');
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00D9FF),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 12,
+                    ),
+                  ),
+                  child: const Text(
+                    'Apply',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
           ),
+        ),
+      ),
     );
   }
 
@@ -3147,105 +3406,105 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (context) => Container(
-            height: 500, // Increased height for more effects
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        height: 500, // Increased height for more effects
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Effects Library',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    if (selectedEffect != null)
-                      TextButton(
-                        onPressed: () {
-                          setState(() => selectedEffect = null);
-                          _showMessage('Effect removed');
-                        },
-                        child: const Text(
-                          'Remove',
-                          style: TextStyle(color: Color(0xFF00D9FF)),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                Expanded(
-                  child: GridView.builder(
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 4,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 0.8,
-                        ),
-                    itemCount: effects.length,
-                    itemBuilder: (context, index) {
-                      final effect = effects[index];
-                      final isSelected = selectedEffect == effect['name'];
-                      return GestureDetector(
-                        onTap: () {
-                          setState(
-                            () => selectedEffect = effect['name'] as String,
-                          );
-                          Navigator.pop(context);
-                          _showMessage('Effect: ${effect['name']} applied');
-                        },
-                        child: Column(
-                          children: [
-                            Container(
-                              width: 60,
-                              height: 60,
-                              decoration: BoxDecoration(
-                                color:
-                                    isSelected
-                                        ? const Color(0xFF00D9FF)
-                                        : const Color(0xFF2A2A2A),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color:
-                                      isSelected
-                                          ? const Color(0xFF00D9FF)
-                                          : Colors.transparent,
-                                  width: 2,
-                                ),
-                              ),
-                              child: Icon(
-                                effect['icon'] as IconData,
-                                color: isSelected ? Colors.black : Colors.white,
-                                size: 28,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              effect['name'] as String,
-                              style: TextStyle(
-                                color:
-                                    isSelected
-                                        ? const Color(0xFF00D9FF)
-                                        : Colors.white70,
-                                fontSize: 10,
-                              ),
-                              textAlign: TextAlign.center,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+                const Text(
+                  'Effects Library',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
+                if (selectedEffect != null)
+                  TextButton(
+                    onPressed: () {
+                      setState(() => selectedEffect = null);
+                      _showMessage('Effect removed');
+                    },
+                    child: const Text(
+                      'Remove',
+                      style: TextStyle(color: Color(0xFF00D9FF)),
+                    ),
+                  ),
               ],
             ),
-          ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: GridView.builder(
+                gridDelegate:
+                const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 0.8,
+                ),
+                itemCount: effects.length,
+                itemBuilder: (context, index) {
+                  final effect = effects[index];
+                  final isSelected = selectedEffect == effect['name'];
+                  return GestureDetector(
+                    onTap: () {
+                      setState(
+                            () => selectedEffect = effect['name'] as String,
+                      );
+                      Navigator.pop(context);
+                      _showMessage('Effect: ${effect['name']} applied');
+                    },
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 60,
+                          height: 60,
+                          decoration: BoxDecoration(
+                            color:
+                            isSelected
+                                ? const Color(0xFF00D9FF)
+                                : const Color(0xFF2A2A2A),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color:
+                              isSelected
+                                  ? const Color(0xFF00D9FF)
+                                  : Colors.transparent,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            effect['icon'] as IconData,
+                            color: isSelected ? Colors.black : Colors.white,
+                            size: 28,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          effect['name'] as String,
+                          style: TextStyle(
+                            color:
+                            isSelected
+                                ? const Color(0xFF00D9FF)
+                                : Colors.white70,
+                            fontSize: 10,
+                          ),
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3280,171 +3539,171 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 450,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Filters',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        height: 100,
-                        child: ListView.builder(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: filters.length,
-                          itemBuilder: (context, index) {
-                            final filter = filters[index];
-                            final isSelected = tempFilter == filter;
-                            return GestureDetector(
-                              onTap: () => setM(() => tempFilter = filter),
-                              child: Container(
-                                width: 80,
-                                margin: const EdgeInsets.only(right: 12),
-                                child: Column(
-                                  children: [
-                                    Container(
-                                      width: 70,
-                                      height: 70,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFF2A2A2A),
-                                        borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(
-                                          color:
-                                              isSelected
-                                                  ? const Color(0xFF00D9FF)
-                                                  : Colors.transparent,
-                                          width: 3,
-                                        ),
-                                        gradient: LinearGradient(
-                                          colors: [
-                                            Color.fromARGB(
-                                              255,
-                                              (index * 30 + 100).clamp(0, 255),
-                                              (index * 20 + 80).clamp(0, 255),
-                                              (index * 40 + 120).clamp(0, 255),
-                                            ),
-                                            Color.fromARGB(
-                                              255,
-                                              (index * 40 + 80).clamp(0, 255),
-                                              (index * 30 + 100).clamp(0, 255),
-                                              (index * 20 + 90).clamp(0, 255),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      child: Center(
-                                        child: Text(
-                                          filter[0],
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 24,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ),
+        builder:
+            (ctx, setM) => Container(
+          height: 450,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Filters',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 100,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: filters.length,
+                  itemBuilder: (context, index) {
+                    final filter = filters[index];
+                    final isSelected = tempFilter == filter;
+                    return GestureDetector(
+                      onTap: () => setM(() => tempFilter = filter),
+                      child: Container(
+                        width: 80,
+                        margin: const EdgeInsets.only(right: 12),
+                        child: Column(
+                          children: [
+                            Container(
+                              width: 70,
+                              height: 70,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF2A2A2A),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color:
+                                  isSelected
+                                      ? const Color(0xFF00D9FF)
+                                      : Colors.transparent,
+                                  width: 3,
+                                ),
+                                gradient: LinearGradient(
+                                  colors: [
+                                    Color.fromARGB(
+                                      255,
+                                      (index * 30 + 100).clamp(0, 255),
+                                      (index * 20 + 80).clamp(0, 255),
+                                      (index * 40 + 120).clamp(0, 255),
                                     ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      filter,
-                                      style: TextStyle(
-                                        color:
-                                            isSelected
-                                                ? const Color(0xFF00D9FF)
-                                                : Colors.white70,
-                                        fontSize: 11,
-                                      ),
-                                      textAlign: TextAlign.center,
+                                    Color.fromARGB(
+                                      255,
+                                      (index * 40 + 80).clamp(0, 255),
+                                      (index * 30 + 100).clamp(0, 255),
+                                      (index * 20 + 90).clamp(0, 255),
                                     ),
                                   ],
                                 ),
                               ),
-                            );
-                          },
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      const Text(
-                        'Intensity',
-                        style: TextStyle(color: Colors.white, fontSize: 16),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Slider(
-                              value: tempIntensity,
-                              min: 0,
-                              max: 1,
-                              divisions: 10,
-                              activeColor: const Color(0xFF00D9FF),
-                              onChanged: (v) => setM(() => tempIntensity = v),
+                              child: Center(
+                                child: Text(
+                                  filter[0],
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
-                          SizedBox(
-                            width: 50,
-                            child: Text(
-                              '${(tempIntensity * 100).toInt()}%',
-                              style: const TextStyle(color: Colors.white),
+                            const SizedBox(height: 4),
+                            Text(
+                              filter,
+                              style: TextStyle(
+                                color:
+                                isSelected
+                                    ? const Color(0xFF00D9FF)
+                                    : Colors.white70,
+                                fontSize: 11,
+                              ),
                               textAlign: TextAlign.center,
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                      const Spacer(),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: () => Navigator.pop(ctx),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF2A2A2A),
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                              ),
-                              child: const Text('Cancel'),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: () {
-                                setState(() {
-                                  selectedFilter = tempFilter;
-                                  filterIntensity = tempIntensity;
-                                });
-                                Navigator.pop(ctx);
-                                _showMessage('Filter: $tempFilter applied');
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF00D9FF),
-                                foregroundColor: Colors.black,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                              ),
-                              child: const Text(
-                                'Apply',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                    );
+                  },
                 ),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Intensity',
+                style: TextStyle(color: Colors.white, fontSize: 16),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Slider(
+                      value: tempIntensity,
+                      min: 0,
+                      max: 1,
+                      divisions: 10,
+                      activeColor: const Color(0xFF00D9FF),
+                      onChanged: (v) => setM(() => tempIntensity = v),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 50,
+                    child: Text(
+                      '${(tempIntensity * 100).toInt()}%',
+                      style: const TextStyle(color: Colors.white),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF2A2A2A),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 14,
+                        ),
+                      ),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          selectedFilter = tempFilter;
+                          filterIntensity = tempIntensity;
+                        });
+                        Navigator.pop(ctx);
+                        _showMessage('Filter: $tempFilter applied');
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF00D9FF),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 14,
+                        ),
+                      ),
+                      child: const Text(
+                        'Apply',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -3473,79 +3732,79 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (context) => Container(
-            height: 450,
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Animations',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
+        height: 450,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Animations',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Add smooth animations to your clips',
+              style: TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: GridView.builder(
+                gridDelegate:
+                const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 0.85,
                 ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Add smooth animations to your clips',
-                  style: TextStyle(color: Colors.white54, fontSize: 13),
-                ),
-                const SizedBox(height: 16),
-                Expanded(
-                  child: GridView.builder(
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 4,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 0.85,
-                        ),
-                    itemCount: animations.length,
-                    itemBuilder: (context, index) {
-                      final animation = animations[index];
-                      return GestureDetector(
-                        onTap: () {
-                          Navigator.pop(context);
-                          _showMessage(
-                            '${animation['name']} animation applied',
-                          );
-                        },
-                        child: Column(
-                          children: [
-                            Container(
-                              width: 60,
-                              height: 60,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF2A2A2A),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Icon(
-                                animation['icon'] as IconData,
-                                color: const Color(0xFF00D9FF),
-                                size: 28,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              animation['name'] as String,
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 10,
-                              ),
-                              textAlign: TextAlign.center,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
+                itemCount: animations.length,
+                itemBuilder: (context, index) {
+                  final animation = animations[index];
+                  return GestureDetector(
+                    onTap: () {
+                      Navigator.pop(context);
+                      _showMessage(
+                        '${animation['name']} animation applied',
                       );
                     },
-                  ),
-                ),
-              ],
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 60,
+                          height: 60,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2A2A2A),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(
+                            animation['icon'] as IconData,
+                            color: const Color(0xFF00D9FF),
+                            size: 28,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          animation['name'] as String,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 10,
+                          ),
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
             ),
-          ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3571,106 +3830,106 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 500,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Transitions',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Smoothly join your clips',
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
-                      ),
-                      const SizedBox(height: 16),
-                      Expanded(
-                        child: GridView.builder(
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: 4,
-                                mainAxisSpacing: 12,
-                                crossAxisSpacing: 12,
-                                childAspectRatio: 0.85,
-                              ),
-                          itemCount: transitions.length,
-                          itemBuilder: (context, index) {
-                            final transition = transitions[index];
-                            return GestureDetector(
-                              onTap: () {
-                                _showMessage(
-                                  '${transition['name']} transition added',
-                                );
-                              },
-                              child: Column(
-                                children: [
-                                  Container(
-                                    width: 60,
-                                    height: 60,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF2A2A2A),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Icon(
-                                      transition['icon'] as IconData,
-                                      color: const Color(0xFF00D9FF),
-                                      size: 28,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    transition['name'] as String,
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 10,
-                                    ),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'Duration',
-                        style: TextStyle(color: Colors.white, fontSize: 14),
-                      ),
-                      Row(
+        builder:
+            (ctx, setM) => Container(
+          height: 500,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Transitions',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Smoothly join your clips',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: GridView.builder(
+                  gridDelegate:
+                  const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 4,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 0.85,
+                  ),
+                  itemCount: transitions.length,
+                  itemBuilder: (context, index) {
+                    final transition = transitions[index];
+                    return GestureDetector(
+                      onTap: () {
+                        _showMessage(
+                          '${transition['name']} transition added',
+                        );
+                      },
+                      child: Column(
                         children: [
-                          Expanded(
-                            child: Slider(
-                              value: duration,
-                              min: 0.1,
-                              max: 3.0,
-                              divisions: 29,
-                              activeColor: const Color(0xFF00D9FF),
-                              onChanged: (v) => setM(() => duration = v),
+                          Container(
+                            width: 60,
+                            height: 60,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2A2A2A),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(
+                              transition['icon'] as IconData,
+                              color: const Color(0xFF00D9FF),
+                              size: 28,
                             ),
                           ),
-                          SizedBox(
-                            width: 60,
-                            child: Text(
-                              '${duration.toStringAsFixed(1)}s',
-                              style: const TextStyle(color: Colors.white),
-                              textAlign: TextAlign.center,
+                          const SizedBox(height: 6),
+                          Text(
+                            transition['name'] as String,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 10,
                             ),
+                            textAlign: TextAlign.center,
                           ),
                         ],
                       ),
-                    ],
-                  ),
+                    );
+                  },
                 ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Duration',
+                style: TextStyle(color: Colors.white, fontSize: 14),
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Slider(
+                      value: duration,
+                      min: 0.1,
+                      max: 3.0,
+                      divisions: 29,
+                      activeColor: const Color(0xFF00D9FF),
+                      onChanged: (v) => setM(() => duration = v),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 60,
+                    child: Text(
+                      '${duration.toStringAsFixed(1)}s',
+                      style: const TextStyle(color: Colors.white),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -3699,61 +3958,61 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (context) => Container(
-            height: 450,
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Stickers',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Add animated stickers to your video',
-                  style: TextStyle(color: Colors.white54, fontSize: 13),
-                ),
-                const SizedBox(height: 16),
-                Expanded(
-                  child: GridView.builder(
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 4,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 1,
-                        ),
-                    itemCount: stickers.length,
-                    itemBuilder: (context, index) {
-                      final sticker = stickers[index];
-                      return GestureDetector(
-                        onTap: () {
-                          _addSticker(sticker['emoji']!);
-                          Navigator.pop(context);
-                        },
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF2A2A2A),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Center(
-                            child: Text(
-                              sticker['emoji']!,
-                              style: const TextStyle(fontSize: 40),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
+        height: 450,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Stickers',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
+            const SizedBox(height: 8),
+            const Text(
+              'Add animated stickers to your video',
+              style: TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: GridView.builder(
+                gridDelegate:
+                const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 1,
+                ),
+                itemCount: stickers.length,
+                itemBuilder: (context, index) {
+                  final sticker = stickers[index];
+                  return GestureDetector(
+                    onTap: () {
+                      _addSticker(sticker['emoji']!);
+                      Navigator.pop(context);
+                    },
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2A2A),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Center(
+                        child: Text(
+                          sticker['emoji']!,
+                          style: const TextStyle(fontSize: 40),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3790,55 +4049,55 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (context) => Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Photo Edit',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _photoEditOption(Icons.brightness_6, 'Brightness', () {
-                  Navigator.pop(context);
-                  _showAdjustmentSlider('Brightness', 0, 2);
-                }),
-                _photoEditOption(Icons.contrast, 'Contrast', () {
-                  Navigator.pop(context);
-                  _showAdjustmentSlider('Contrast', 0, 2);
-                }),
-                _photoEditOption(Icons.palette, 'Saturation', () {
-                  Navigator.pop(context);
-                  _showAdjustmentSlider('Saturation', 0, 2);
-                }),
-                _photoEditOption(Icons.opacity, 'Exposure', () {
-                  Navigator.pop(context);
-                  _showAdjustmentSlider('Exposure', -2, 2);
-                }),
-                _photoEditOption(Icons.wb_sunny, 'Temperature', () {
-                  Navigator.pop(context);
-                  _showAdjustmentSlider('Temperature', -100, 100);
-                }),
-                _photoEditOption(Icons.tune, 'Sharpness', () {
-                  Navigator.pop(context);
-                  _showAdjustmentSlider('Sharpness', 0, 2);
-                }),
-                _photoEditOption(Icons.crop, 'Crop', () {
-                  Navigator.pop(context);
-                  _showMessage('Crop tool opened');
-                }),
-                _photoEditOption(Icons.rotate_90_degrees_ccw, 'Rotate', () {
-                  Navigator.pop(context);
-                  _showMessage('Rotating...');
-                }),
-              ],
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Photo Edit',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
+            const SizedBox(height: 16),
+            _photoEditOption(Icons.brightness_6, 'Brightness', () {
+              Navigator.pop(context);
+              _showAdjustmentSlider('Brightness', 0, 2);
+            }),
+            _photoEditOption(Icons.contrast, 'Contrast', () {
+              Navigator.pop(context);
+              _showAdjustmentSlider('Contrast', 0, 2);
+            }),
+            _photoEditOption(Icons.palette, 'Saturation', () {
+              Navigator.pop(context);
+              _showAdjustmentSlider('Saturation', 0, 2);
+            }),
+            _photoEditOption(Icons.opacity, 'Exposure', () {
+              Navigator.pop(context);
+              _showAdjustmentSlider('Exposure', -2, 2);
+            }),
+            _photoEditOption(Icons.wb_sunny, 'Temperature', () {
+              Navigator.pop(context);
+              _showAdjustmentSlider('Temperature', -100, 100);
+            }),
+            _photoEditOption(Icons.tune, 'Sharpness', () {
+              Navigator.pop(context);
+              _showAdjustmentSlider('Sharpness', 0, 2);
+            }),
+            _photoEditOption(Icons.crop, 'Crop', () {
+              Navigator.pop(context);
+              _showMessage('Crop tool opened');
+            }),
+            _photoEditOption(Icons.rotate_90_degrees_ccw, 'Rotate', () {
+              Navigator.pop(context);
+              _showMessage('Rotating...');
+            }),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3858,61 +4117,61 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 250,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Text(
-                        name,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        value.toStringAsFixed(2),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                        ),
-                      ),
-                      Slider(
-                        value: value,
-                        min: min,
-                        max: max,
-                        divisions: 40,
-                        activeColor: const Color(0xFF00D9FF),
-                        onChanged: (v) => setM(() => value = v),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          Navigator.pop(ctx);
-                          _showMessage(
-                            '$name: ${value.toStringAsFixed(2)} applied',
-                          );
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00D9FF),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 32,
-                            vertical: 12,
-                          ),
-                        ),
-                        child: const Text(
-                          'Apply',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+        builder:
+            (ctx, setM) => Container(
+          height: 250,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              Text(
+                name,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                value.toStringAsFixed(2),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                ),
+              ),
+              Slider(
+                value: value,
+                min: min,
+                max: max,
+                divisions: 40,
+                activeColor: const Color(0xFF00D9FF),
+                onChanged: (v) => setM(() => value = v),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showMessage(
+                    '$name: ${value.toStringAsFixed(2)} applied',
+                  );
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D9FF),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 12,
                   ),
                 ),
+                child: const Text(
+                  'Apply',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -3922,68 +4181,68 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (context) => Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Captions',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _captionOption(
-                  Icons.auto_awesome,
-                  'Auto Captions',
-                  'AI-generated subtitles',
-                  () {
-                    Navigator.pop(context);
-                    _showMessage('Generating auto captions...');
-                  },
-                ),
-                _captionOption(
-                  Icons.text_fields,
-                  'Manual Captions',
-                  'Add captions manually',
-                  () {
-                    Navigator.pop(context);
-                    _addText();
-                  },
-                ),
-                _captionOption(
-                  Icons.translate,
-                  'Translate',
-                  'Translate captions',
-                  () {
-                    Navigator.pop(context);
-                    _showMessage('Translation feature');
-                  },
-                ),
-                _captionOption(
-                  Icons.style,
-                  'Caption Styles',
-                  'Customize appearance',
-                  () {
-                    Navigator.pop(context);
-                    _showMessage('Caption styles');
-                  },
-                ),
-              ],
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Captions',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
+            const SizedBox(height: 16),
+            _captionOption(
+              Icons.auto_awesome,
+              'Auto Captions',
+              'AI-generated subtitles',
+                  () {
+                Navigator.pop(context);
+                _showMessage('Generating auto captions...');
+              },
+            ),
+            _captionOption(
+              Icons.text_fields,
+              'Manual Captions',
+              'Add captions manually',
+                  () {
+                Navigator.pop(context);
+                _addText();
+              },
+            ),
+            _captionOption(
+              Icons.translate,
+              'Translate',
+              'Translate captions',
+                  () {
+                Navigator.pop(context);
+                _showMessage('Translation feature');
+              },
+            ),
+            _captionOption(
+              Icons.style,
+              'Caption Styles',
+              'Customize appearance',
+                  () {
+                Navigator.pop(context);
+                _showMessage('Caption styles');
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _captionOption(
-    IconData icon,
-    String title,
-    String subtitle,
-    VoidCallback onTap,
-  ) {
+      IconData icon,
+      String title,
+      String subtitle,
+      VoidCallback onTap,
+      ) {
     return ListTile(
       leading: Container(
         padding: const EdgeInsets.all(8),
@@ -4020,114 +4279,114 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 400,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Green Screen (Chroma Key)',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
+        builder:
+            (ctx, setM) => Container(
+          height: 400,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Green Screen (Chroma Key)',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Remove colored backgrounds from your video',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Select Color to Remove',
+                style: TextStyle(color: Colors.white, fontSize: 16),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  _colorOption(Colors.green, 'Green', setM),
+                  _colorOption(Colors.blue, 'Blue', setM),
+                  _colorOption(Colors.red, 'Red', setM),
+                  _colorOption(Colors.white, 'White', setM),
+                  _colorOption(Colors.black, 'Black', setM),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Sensitivity',
+                style: TextStyle(color: Colors.white, fontSize: 16),
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Slider(
+                      value: sensitivity,
+                      min: 0,
+                      max: 1,
+                      divisions: 10,
+                      activeColor: const Color(0xFF00D9FF),
+                      onChanged: (v) => setM(() => sensitivity = v),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 50,
+                    child: Text(
+                      '${(sensitivity * 100).toInt()}%',
+                      style: const TextStyle(color: Colors.white),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF2A2A2A),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 14,
                         ),
                       ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Remove colored backgrounds from your video',
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
-                      ),
-                      const SizedBox(height: 24),
-                      const Text(
-                        'Select Color to Remove',
-                        style: TextStyle(color: Colors.white, fontSize: 16),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: [
-                          _colorOption(Colors.green, 'Green', setM),
-                          _colorOption(Colors.blue, 'Blue', setM),
-                          _colorOption(Colors.red, 'Red', setM),
-                          _colorOption(Colors.white, 'White', setM),
-                          _colorOption(Colors.black, 'Black', setM),
-                        ],
-                      ),
-                      const SizedBox(height: 24),
-                      const Text(
-                        'Sensitivity',
-                        style: TextStyle(color: Colors.white, fontSize: 16),
-                      ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Slider(
-                              value: sensitivity,
-                              min: 0,
-                              max: 1,
-                              divisions: 10,
-                              activeColor: const Color(0xFF00D9FF),
-                              onChanged: (v) => setM(() => sensitivity = v),
-                            ),
-                          ),
-                          SizedBox(
-                            width: 50,
-                            child: Text(
-                              '${(sensitivity * 100).toInt()}%',
-                              style: const TextStyle(color: Colors.white),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const Spacer(),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: () => Navigator.pop(ctx),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF2A2A2A),
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                              ),
-                              child: const Text('Cancel'),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: () {
-                                Navigator.pop(ctx);
-                                _showMessage(
-                                  'Green screen applied with ${(sensitivity * 100).toInt()}% sensitivity',
-                                );
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF00D9FF),
-                                foregroundColor: Colors.black,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                              ),
-                              child: const Text(
-                                'Apply',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
+                      child: const Text('Cancel'),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _showMessage(
+                          'Green screen applied with ${(sensitivity * 100).toInt()}% sensitivity',
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF00D9FF),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 14,
+                        ),
+                      ),
+                      child: const Text(
+                        'Apply',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -4165,81 +4424,81 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (context) => Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Background Removal',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Automatically remove backgrounds using AI',
-                  style: TextStyle(color: Colors.white54, fontSize: 13),
-                ),
-                const SizedBox(height: 24),
-                _bgRemovalOption(
-                  Icons.person,
-                  'Remove Person BG',
-                  'AI removes background from people',
-                  () {
-                    Navigator.pop(context);
-                    _showLoading();
-                    Future.delayed(const Duration(seconds: 2), () {
-                      _hideLoading();
-                      _showMessage('Background removed successfully');
-                    });
-                  },
-                ),
-                _bgRemovalOption(
-                  Icons.landscape,
-                  'Remove Object BG',
-                  'AI removes background from objects',
-                  () {
-                    Navigator.pop(context);
-                    _showLoading();
-                    Future.delayed(const Duration(seconds: 2), () {
-                      _hideLoading();
-                      _showMessage('Background removed successfully');
-                    });
-                  },
-                ),
-                _bgRemovalOption(
-                  Icons.auto_fix_high,
-                  'Smart Cutout',
-                  'Automatically detect and cut subject',
-                  () {
-                    Navigator.pop(context);
-                    _showMessage('Smart cutout processing...');
-                  },
-                ),
-                _bgRemovalOption(
-                  Icons.color_lens,
-                  'Replace Background',
-                  'Add custom background',
-                  () {
-                    Navigator.pop(context);
-                    _showBackgroundReplace();
-                  },
-                ),
-              ],
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Background Removal',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
+            const SizedBox(height: 8),
+            const Text(
+              'Automatically remove backgrounds using AI',
+              style: TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+            const SizedBox(height: 24),
+            _bgRemovalOption(
+              Icons.person,
+              'Remove Person BG',
+              'AI removes background from people',
+                  () {
+                Navigator.pop(context);
+                _showLoading();
+                Future.delayed(const Duration(seconds: 2), () {
+                  _hideLoading();
+                  _showMessage('Background removed successfully');
+                });
+              },
+            ),
+            _bgRemovalOption(
+              Icons.landscape,
+              'Remove Object BG',
+              'AI removes background from objects',
+                  () {
+                Navigator.pop(context);
+                _showLoading();
+                Future.delayed(const Duration(seconds: 2), () {
+                  _hideLoading();
+                  _showMessage('Background removed successfully');
+                });
+              },
+            ),
+            _bgRemovalOption(
+              Icons.auto_fix_high,
+              'Smart Cutout',
+              'Automatically detect and cut subject',
+                  () {
+                Navigator.pop(context);
+                _showMessage('Smart cutout processing...');
+              },
+            ),
+            _bgRemovalOption(
+              Icons.color_lens,
+              'Replace Background',
+              'Add custom background',
+                  () {
+                Navigator.pop(context);
+                _showBackgroundReplace();
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _bgRemovalOption(
-    IconData icon,
-    String title,
-    String subtitle,
-    VoidCallback onTap,
-  ) {
+      IconData icon,
+      String title,
+      String subtitle,
+      VoidCallback onTap,
+      ) {
     return ListTile(
       leading: Container(
         padding: const EdgeInsets.all(8),
@@ -4272,91 +4531,102 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> with TickerProvid
       isScrollControlled: true,
       builder:
           (context) => Container(
-            height: 400,
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Replace Background',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Expanded(
-                  child: GridView.builder(
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 3,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 1,
-                        ),
-                    itemCount: 12,
-                    itemBuilder: (context, index) {
-                      final colors = [
-                        Colors.white,
-                        Colors.black,
-                        Colors.blue,
-                        Colors.red,
-                        Colors.green,
-                        Colors.purple,
-                        Colors.orange,
-                        Colors.pink,
-                        Colors.teal,
-                        Colors.amber,
-                        Colors.indigo,
-                        Colors.cyan,
-                      ];
-                      return GestureDetector(
-                        onTap: () {
-                          Navigator.pop(context);
-                          _showMessage('Background replaced');
-                        },
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: colors[index],
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.white24, width: 2),
-                          ),
-                          child:
-                              index == 0
-                                  ? const Icon(
-                                    Icons.add_photo_alternate,
-                                    color: Colors.black87,
-                                    size: 40,
-                                  )
-                                  : null,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    final XFile? file = await _picker.pickImage(
-                      source: ImageSource.gallery,
-                    );
-                    if (file != null) {
-                      _showMessage('Custom background added');
-                    }
-                  },
-                  icon: const Icon(Icons.photo_library),
-                  label: const Text('Choose from Gallery'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00D9FF),
-                    foregroundColor: Colors.black,
-                    minimumSize: const Size(double.infinity, 50),
-                  ),
-                ),
-              ],
+        height: 400,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Replace Background',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: GridView.builder(
+                gridDelegate:
+                const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 1,
+                ),
+                itemCount: 12,
+                itemBuilder: (context, index) {
+                  final colors = [
+                    Colors.white,
+                    Colors.black,
+                    Colors.blue,
+                    Colors.red,
+                    Colors.green,
+                    Colors.purple,
+                    Colors.orange,
+                    Colors.pink,
+                    Colors.teal,
+                    Colors.amber,
+                    Colors.indigo,
+                    Colors.cyan,
+                  ];
+                  return GestureDetector(
+                    onTap: () {
+                      Navigator.pop(context);
+                      _showMessage('Background replaced');
+                    },
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: colors[index],
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white24, width: 2),
+                      ),
+                      child:
+                      index == 0
+                          ? const Icon(
+                        Icons.add_photo_alternate,
+                        color: Colors.black87,
+                        size: 40,
+                      )
+                          : null,
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () async {
+                Navigator.pop(context);
+                final XFile? file = await _picker.pickImage(
+                  source: ImageSource.gallery,
+                );
+                if (file != null) {
+                  _showMessage('Custom background added');
+                }
+              },
+              icon: const Icon(Icons.photo_library),
+              label: const Text('Choose from Gallery'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF00D9FF),
+                foregroundColor: Colors.black,
+                minimumSize: const Size(double.infinity, 50),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
+}
+
+class _VideoProcessResult {
+  final TimelineItem item;
+  final VideoPlayerController controller;
+  _VideoProcessResult(this.item, this.controller);
+}
+class _InitialLoadResult {
+  final List<TimelineItem> items;
+  final Map<String, VideoPlayerController> controllersMap;
+  _InitialLoadResult(this.items, this.controllersMap);
 }

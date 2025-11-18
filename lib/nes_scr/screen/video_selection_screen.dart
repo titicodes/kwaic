@@ -1,251 +1,448 @@
-// // video_selection_screen.dart
-// import 'dart:io';
-// import 'dart:typed_data';
-// import 'package:flutter/material.dart';
-// import 'package:image_picker/image_picker.dart';
-// import 'video_editor_screen.dart';
-//
-// class VideoSelectionScreen extends StatefulWidget {
-//   final List<XFile> initialPickedVideos;
-//
-//   const VideoSelectionScreen({super.key, required this.initialPickedVideos});
-//
-//   @override
-//   State<VideoSelectionScreen> createState() => _VideoSelectionScreenState();
-// }
-//
-// class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
-//   late List<XFile> selectedVideos;
-//
-//   @override
-//   void initState() {
-//     super.initState();
-//     selectedVideos = List.from(widget.initialPickedVideos);
-//   }
-//
-//   Future<Uint8List?> _safeReadBytes(XFile file) async {
-//     try {
-//       return await file.readAsBytes().timeout(const Duration(seconds: 3));
-//     } catch (_) {
-//       return null; // Allowed here because our function returns Uint8List?
-//     }
-//   }
-//
-//   Future<void> _pickMoreVideos() async {
-//     try {
-//       final picker = ImagePicker();
-//       final picked = await picker.pickMultipleMedia();
-//
-//       if (!mounted) return;
-//
-//       if (picked.isNotEmpty) {
-//         setState(() {
-//           selectedVideos.addAll(
-//             picked.where((f) {
-//               final path = f.path.toLowerCase();
-//               return path.endsWith('.mp4') ||
-//                   path.endsWith('.mov') ||
-//                   path.endsWith('.avi') ||
-//                   path.endsWith('.mkv') ||
-//                   path.endsWith('.webm') ||
-//                   path.endsWith('.3gp');
-//             }),
-//           );
-//         });
-//       }
-//     } catch (e) {
-//       if (!mounted) return;
-//       ScaffoldMessenger.of(
-//         context,
-//       ).showSnackBar(SnackBar(content: Text('Error picking videos: $e')));
-//     }
-//   }
-//
-//   void _removeVideo(int index) {
-//     setState(() {
-//       selectedVideos.removeAt(index);
-//     });
-//   }
-//
-//   void _goToEditor() async {
-//     if (selectedVideos.isEmpty) {
-//       ScaffoldMessenger.of(context).showSnackBar(
-//         const SnackBar(content: Text('Please select at least one video')),
-//       );
-//       return;
-//     }
-//
-//     // Critical: Check if still mounted before navigation
-//     if (!mounted) return;
-//
-//     // Convert XFile → File safely
-//     final List<File> videoFiles = [];
-//     for (final xfile in selectedVideos) {
-//       try {
-//         final file = File(xfile.path);
-//         if (await file.exists()) {
-//           videoFiles.add(file);
-//         }
-//       } catch (e) {
-//         debugPrint('Failed to access file: ${xfile.path}');
-//         // Skip invalid files
-//       }
-//     }
-//
-//     if (videoFiles.isEmpty) {
-//       ScaffoldMessenger.of(
-//         context,
-//       ).showSnackBar(const SnackBar(content: Text('No valid videos to edit')));
-//       return;
-//     }
-//
-//     // Final safety check
-//     if (!mounted) return;
-//
-//     Navigator.push(
-//       context,
-//       PageRouteBuilder(
-//         pageBuilder:
-//             (c, a1, a2) => VideoEditorScreen(initialVideos: videoFiles),
-//         transitionsBuilder:
-//             (c, anim, a2, child) => FadeTransition(opacity: anim, child: child),
-//         transitionDuration: const Duration(milliseconds: 400),
-//       ),
-//     );
-//   }
-//
-//   @override
-//   Widget build(BuildContext context) {
-//     return Scaffold(
-//       backgroundColor: Colors.black,
-//       appBar: AppBar(
-//         backgroundColor: Colors.black,
-//         elevation: 0,
-//         title: Text('${selectedVideos.length} video(s) selected'),
-//         titleTextStyle: const TextStyle(color: Colors.white, fontSize: 18),
-//         iconTheme: const IconThemeData(color: Colors.white),
-//         actions: [
-//           TextButton(
-//             onPressed: selectedVideos.isEmpty ? null : _goToEditor,
-//             child: const Text(
-//               'Next',
-//               style: TextStyle(color: Colors.white, fontSize: 17),
-//             ),
-//           ),
-//         ],
-//       ),
-//       body:
-//           selectedVideos.isEmpty
-//               ? const Center(
-//                 child: Column(
-//                   mainAxisAlignment: MainAxisAlignment.center,
-//                   children: [
-//                     Icon(
-//                       Icons.video_library_outlined,
-//                       size: 64,
-//                       color: Colors.white30,
-//                     ),
-//                     SizedBox(height: 16),
-//                     Text(
-//                       'No videos selected',
-//                       style: TextStyle(color: Colors.white70, fontSize: 18),
-//                     ),
-//                     SizedBox(height: 8),
-//                     Text(
-//                       'Tap + to add videos',
-//                       style: TextStyle(color: Colors.white38, fontSize: 14),
-//                     ),
-//                   ],
-//                 ),
-//               )
-//               : GridView.builder(
-//                 padding: const EdgeInsets.all(12),
-//                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-//                   crossAxisCount: 3,
-//                   crossAxisSpacing: 12,
-//                   mainAxisSpacing: 12,
-//                   childAspectRatio: 0.75,
-//                 ),
-//                 itemCount: selectedVideos.length,
-//                 itemBuilder: (context, index) {
-//                   final video = selectedVideos[index];
-//
-//                   return GestureDetector(
-//                     onTap:
-//                         () => _removeVideo(
-//                           index,
-//                         ), // Tap whole card to remove (optional UX)
-//                     child: Stack(
-//                       fit: StackFit.expand,
-//                       children: [
-//                         // Thumbnail
-//                         ClipRRect(
-//                           borderRadius: BorderRadius.circular(12),
-//                           child: FutureBuilder<Uint8List?>(
-//                             future: _safeReadBytes(video),
-//                             builder: (context, snapshot) {
-//                               if (snapshot.hasData && snapshot.data != null) {
-//                                 return Image.memory(
-//                                   snapshot.data!,
-//                                   fit: BoxFit.cover,
-//                                   errorBuilder:
-//                                       (_, __, ___) =>
-//                                           Container(color: Colors.grey[800]),
-//                                 );
-//                               }
-//                               return Container(
-//                                 color: Colors.grey[800],
-//                                 child: const Icon(
-//                                   Icons.video_file,
-//                                   color: Colors.white38,
-//                                   size: 32,
-//                                 ),
-//                               );
-//                             },
-//                           ),
-//                         ),
-//
-//                         // Remove button (top right)
-//                         Positioned(
-//                           top: 6,
-//                           right: 6,
-//                           child: GestureDetector(
-//                             onTap: () => _removeVideo(index),
-//                             child: Container(
-//                               padding: const EdgeInsets.all(4),
-//                               decoration: const BoxDecoration(
-//                                 color: Colors.black87,
-//                                 shape: BoxShape.circle,
-//                               ),
-//                               child: const Icon(
-//                                 Icons.close,
-//                                 size: 18,
-//                                 color: Colors.white,
-//                               ),
-//                             ),
-//                           ),
-//                         ),
-//
-//                         // Play icon overlay
-//                         const Align(
-//                           alignment: Alignment.center,
-//                           child: Icon(
-//                             Icons.play_circle_fill,
-//                             size: 48,
-//                             color: Colors.white70,
-//                           ),
-//                         ),
-//                       ],
-//                     ),
-//                   );
-//                 },
-//               ),
-//       floatingActionButton: FloatingActionButton(
-//         backgroundColor: const Color(0xFFA855F7),
-//         elevation: 8,
-//         onPressed: _pickMoreVideos,
-//         child: const Icon(Icons.add, color: Colors.white, size: 28),
-//       ),
-//     );
-//   }
-// }
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:kwaic/nes_scr/screen/video_editor_screen.dart';
+import 'package:video_player/video_player.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
+import 'package:path_provider/path_provider.dart';
+
+class VideoSelectionScreen extends StatefulWidget {
+  const VideoSelectionScreen({super.key});
+
+  @override
+  State<VideoSelectionScreen> createState() => _VideoSelectionScreenState();
+}
+
+class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
+  final List<XFile> _selectedVideos = [];
+  final Map<String, String?> _thumbnails = {};
+  final Map<String, Duration?> _durations = {};
+  bool _isLoading = false;
+
+  Future<void> _pickVideos() async {
+    try {
+      final picker = ImagePicker();
+      final List<XFile>? pickedFiles = await picker.pickMultipleMedia();
+
+      if (pickedFiles == null || pickedFiles.isEmpty) return;
+
+      setState(() => _isLoading = true);
+
+      // Filter video files
+      final videoFiles = pickedFiles.where((f) {
+        final path = f.path.toLowerCase();
+        return path.endsWith('.mp4') ||
+            path.endsWith('.mov') ||
+            path.endsWith('.avi') ||
+            path.endsWith('.mkv') ||
+            path.endsWith('.webm') ||
+            path.endsWith('.m4v') ||
+            path.endsWith('.3gp');
+      }).toList();
+
+      if (videoFiles.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No video files found'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      // Add videos and generate thumbnails
+      for (final video in videoFiles) {
+        if (!_selectedVideos.any((v) => v.path == video.path)) {
+          _selectedVideos.add(video);
+          await _generateThumbnail(video);
+          await _getVideoDuration(video);
+        }
+      }
+
+      setState(() => _isLoading = false);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error picking videos: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _generateThumbnail(XFile video) async {
+    try {
+      final dir = await getTemporaryDirectory();
+      final thumbnailPath = await VideoThumbnail.thumbnailFile(
+        video: video.path,
+        thumbnailPath: dir.path,
+        imageFormat: ImageFormat.PNG,
+        maxWidth: 200,
+        quality: 75,
+      );
+
+      if (mounted) {
+        setState(() {
+          _thumbnails[video.path] = thumbnailPath;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error generating thumbnail: $e');
+    }
+  }
+
+  Future<void> _getVideoDuration(XFile video) async {
+    VideoPlayerController? controller;
+    try {
+      controller = VideoPlayerController.file(File(video.path));
+      await controller.initialize();
+
+      if (mounted) {
+        setState(() {
+          _durations[video.path] = controller?.value.duration;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error getting duration: $e');
+    } finally {
+      await controller?.dispose();
+    }
+  }
+
+  void _removeVideo(int index) {
+    setState(() {
+      final video = _selectedVideos[index];
+      _selectedVideos.removeAt(index);
+      _thumbnails.remove(video.path);
+      _durations.remove(video.path);
+    });
+  }
+
+  String _formatDuration(Duration? duration) {
+    if (duration == null) return '0:00';
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  void _navigateToEditor() {
+    if (_selectedVideos.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select at least one video'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VideoEditorScreen(initialVideos: _selectedVideos),
+      ),
+    ).then((_) {
+      // Optional: clear selection when coming back
+       setState(() => _selectedVideos.clear());
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.close, color: Colors.black),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          _selectedVideos.isEmpty
+              ? 'Select Videos'
+              : '${_selectedVideos.length} selected',
+          style: const TextStyle(
+            color: Colors.black,
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        actions: [
+          if (_selectedVideos.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _selectedVideos.clear();
+                  _thumbnails.clear();
+                  _durations.clear();
+                });
+              },
+              child: const Text(
+                'Clear',
+                style: TextStyle(
+                  color: Color(0xFF8B5CF6),
+                  fontSize: 16,
+                ),
+              ),
+            ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Selected videos grid
+          Expanded(
+            child: _isLoading
+                ? const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(
+                    color: Color(0xFF8B5CF6),
+                  ),
+                  SizedBox(height: 16),
+                  Text(
+                    'Loading videos...',
+                    style: TextStyle(
+                      color: Colors.black54,
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              ),
+            )
+                : _selectedVideos.isEmpty
+                ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.video_library_outlined,
+                    size: 80,
+                    color: Colors.grey[300],
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'No videos selected',
+                    style: TextStyle(
+                      fontSize: 18,
+                      color: Colors.grey[600],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Tap the button below to add videos',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey[500],
+                    ),
+                  ),
+                ],
+              ),
+            )
+                : GridView.builder(
+              padding: const EdgeInsets.all(16),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 0.75,
+              ),
+              itemCount: _selectedVideos.length,
+              itemBuilder: (context, index) {
+                final video = _selectedVideos[index];
+                final thumbnail = _thumbnails[video.path];
+                final duration = _durations[video.path];
+
+                return Stack(
+                  children: [
+                    // Video thumbnail
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.grey[300],
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: thumbnail != null
+                            ? Image.file(
+                          File(thumbnail),
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
+                        )
+                            : const Center(
+                          child: Icon(
+                            Icons.video_library,
+                            color: Colors.white,
+                            size: 40,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Index badge
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF8B5CF6),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          '${index + 1}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Remove button
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: GestureDetector(
+                        onTap: () => _removeVideo(index),
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: const BoxDecoration(
+                            color: Colors.black54,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.close,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Duration
+                    if (duration != null)
+                      Positioned(
+                        bottom: 8,
+                        right: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            _formatDuration(duration),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+
+          // Bottom buttons
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 10,
+                  offset: const Offset(0, -5),
+                ),
+              ],
+            ),
+            child: SafeArea(
+              child: Row(
+                children: [
+                  // Add more videos button
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _isLoading ? null : _pickVideos,
+                      icon: const Icon(Icons.add),
+                      label: Text(_selectedVideos.isEmpty
+                          ? 'Select Videos'
+                          : 'Add More'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF8B5CF6),
+                        side: const BorderSide(
+                          color: Color(0xFF8B5CF6),
+                          width: 2,
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  if (_selectedVideos.isNotEmpty) ...[
+                    const SizedBox(width: 12),
+                    // Next button
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _navigateToEditor,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF8B5CF6),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          elevation: 0,
+                        ),
+                        child: const Text(
+                          'Next',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    // Clean up thumbnails
+    for (final path in _thumbnails.values) {
+      if (path != null) {
+        try {
+          File(path).deleteSync();
+        } catch (e) {
+          debugPrint('Error deleting thumbnail: $e');
+        }
+      }
+    }
+    super.dispose();
+  }
+}
+

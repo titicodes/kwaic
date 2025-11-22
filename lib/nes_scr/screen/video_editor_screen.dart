@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:collection/collection.dart';
 import 'package:ffmpeg_kit_min_gpl/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_min_gpl/return_code.dart';
 import 'package:flutter/material.dart';
@@ -95,7 +96,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       });
     }
   }
-
 
 
   Future<void> _processInitialVideos() async {
@@ -340,7 +340,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     final activeVideo = _findActiveVideo();
 
-    // VIDEO
     if (activeVideo != null && _controllers.containsKey(activeVideo.id)) {
       final ctrl = _controllers[activeVideo.id]!;
       final local = playheadPosition - activeVideo.startTime;
@@ -348,7 +347,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         milliseconds: (local.inMilliseconds * activeVideo.speed).round(),
       );
 
-      // Seek only if needed (prevents jitter)
       if ((ctrl.value.position - source).inMilliseconds.abs() > 100) {
         ctrl.seekTo(source);
       }
@@ -356,7 +354,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ctrl.setPlaybackSpeed(activeVideo.speed);
       ctrl.setVolume(activeVideo.volume);
 
-      // Play/Pause sync
+      // PERFECT PLAY/PAUSE
       if (isPlaying) {
         if (!ctrl.value.isPlaying) ctrl.play();
       } else {
@@ -367,7 +365,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         _activeVideoController?.pause();
         _activeVideoController = ctrl;
         _activeItem = activeVideo;
-        setState(() {}); // This triggers highlight
+        setState(() {});
       }
     } else {
       _activeVideoController?.pause();
@@ -563,6 +561,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       debugPrint('Controller init failed: $e');
     }
   }
+
   Widget _buildLeftTrimHandle(TimelineItem item, Duration minDuration) {
     return Positioned(
       left: 0,
@@ -629,6 +628,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
     );
   }
+
   Future<void> _addAudio() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.audio);
     if (result == null || result.files.isEmpty) return;
@@ -1332,6 +1332,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
     );
   }
+
   Widget _applyEffect(Widget child) {
     switch (selectedEffect) {
       case 'Blur':
@@ -1795,61 +1796,23 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   Widget _buildDurationRuler() {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final centerX = screenWidth / 2;
     final totalSec = _getTotalDuration();
-    final visibleSec = screenWidth / pixelsPerSecond;
+    final visibleSec = MediaQuery.of(context).size.width / pixelsPerSecond;
     final centreSecond = timelineOffset / pixelsPerSecond;
-    final halfScreenSec = visibleSec / 2;
-    double step =
-        pixelsPerSecond > 150
-            ? 0.1
-            : pixelsPerSecond > 80
-            ? 0.5
-            : 1.0;
-    double start = (centreSecond - halfScreenSec).floorToDouble();
-    double end = (centreSecond + halfScreenSec).ceilToDouble();
-    List<Widget> ticks = [];
-    for (double s = start; s <= end; s += step) {
-      if (s < 0 || s > totalSec + 2) continue;
-      final isMajor = (s % 1 == 0);
-      final posX = centerX + (s * pixelsPerSecond) - timelineOffset;
-      if (posX < 0 || posX > screenWidth) continue;
-      ticks.add(
-        Positioned(
-          left: posX,
-          top: 0,
-          child: Column(
-            children: [
-              if (isMajor)
-                Text(
-                  _formatTime(Duration(seconds: s.toInt())),
-                  style: const TextStyle(fontSize: 10, color: Colors.white70),
-                ),
-              const SizedBox(height: 4),
-              Container(width: 1, height: isMajor ? 6 : 3, color: Colors.white),
-            ],
-          ),
+
+    return Container(
+      height: 40,
+      color: const Color(0xFF111111),
+      child: CustomPaint(
+        painter: _DurationRulerPainter(
+          totalSeconds: totalSec,
+          visibleSeconds: visibleSec,
+          offsetSeconds: centreSecond,
+          pixelsPerSecond: pixelsPerSecond,
+          formatTime: _formatTime, // Pass the function
         ),
-      );
-    }
-    return SizedBox(
-      height: 30,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            top: 20,
-            child: Container(height: 1, color: Colors.white30),
-          ),
-          ...ticks,
-        ],
       ),
     );
-  }
-
-  double _clipWidth(TimelineItem item) {
-    final secs = item.duration.inMilliseconds / 1000.0 / item.speed;
-    return (secs * pixelsPerSecond).clamp(60.0, double.infinity);
   }
 
   Widget _clippedTrack({required Widget child}) {
@@ -1868,50 +1831,31 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       child: _clippedTrack(
         child: Stack(
           children: [
-            Positioned.fill(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                physics: const NeverScrollableScrollPhysics(),
-                child: Container(
-                  width: math.max(
-                    screenWidth,
-                    _getTotalDuration() * pixelsPerSecond + screenWidth,
-                  ),
-                  child: Stack(
-                    children: [
-                      if (clips.isNotEmpty)
-                        Positioned(
-                          left: centerX - timelineOffset - 120,
-                          top: 5,
-                          child: Row(
-                            children: [
-                              _sideButton(
-                                Icons.volume_off,
-                                'Sound\nOn',
-                                    () => _showMessage('Mute'),
-                              ),
-                              const SizedBox(width: 8),
-                              _buildCoverButton(),
-                            ],
-                          ),
-                        ),
-                      // Render all video clips
-                      ...clips.map((clip) => _buildVideoClip(clip, centerX)),
-                    ],
-                  ),
+            // Video clips
+            ...clips.map((clip) => _buildVideoClip(clip, centerX)),
+
+            // LEFT: Mute + Cover (belongs to video track)
+            if (clips.isNotEmpty)
+              Positioned(
+                left: centerX - timelineOffset - 120,
+                top: 8,
+                child: Row(
+                  children: [
+                    _sideButton(Icons.volume_off, 'Mute\nclip', () => _showMessage('Mute')),
+                    const SizedBox(width: 8),
+                    _buildCoverButton(),
+                  ],
                 ),
               ),
-            ),
+
+            // + Add video button
             Positioned(
               right: 16,
               top: 20,
               child: FloatingActionButton(
                 mini: true,
                 backgroundColor: Colors.white,
-                onPressed: () {
-                  _saveToHistory();
-                  _addVideo();
-                },
+                onPressed: () { _saveToHistory(); _addVideo(); },
                 child: const Icon(Icons.add, color: Colors.black),
               ),
             ),
@@ -1926,49 +1870,47 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final selected = selectedClip == int.tryParse(item.id);
     final startX = item.startTime.inMilliseconds / 1000 * pixelsPerSecond - timelineOffset;
     final width = _clipWidth(item);
-    final minDuration = const Duration(seconds: 1);
 
     return Positioned(
       left: startX + centerX,
-      child: Stack(
-        children: [
-          GestureDetector(
-            onTap: () => setState(() => selectedClip = int.tryParse(item.id)),
-            onHorizontalDragUpdate: (d) {
-              final deltaSec = d.delta.dx / pixelsPerSecond;
-              final newStart = item.startTime + Duration(milliseconds: (deltaSec * 1000).round());
-              if (newStart >= Duration.zero) {
-                setState(() {
-                  item.startTime = newStart;
-                  clips.sort((a, b) => a.startTime.compareTo(b.startTime));
-                });
-              }
-            },
-            child: Container(
-              width: width,
-              height: 60,
-              margin: const EdgeInsets.only(right: 4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: selected ? const Color(0xFF00D9FF) : Colors.transparent,
-                  width: 2,
-                ),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                // CRITICAL FIX: Use thumbnailBytes with proper error handling
-                child: _buildThumbnailStrip(item),
-              ),
-            ),
+      child: GestureDetector(
+        // DRAG TO MOVE CLIP
+        onHorizontalDragUpdate: (d) {
+          final deltaSec = d.delta.dx / pixelsPerSecond;
+          final newStart = item.startTime + Duration(milliseconds: (deltaSec * 1000).round());
+          if (newStart >= Duration.zero) {
+            setState(() {
+              item.startTime = newStart;
+              clips.sort((a, b) => a.startTime.compareTo(b.startTime));
+            });
+            _updatePreview();
+          }
+        },
+        // TAP TO SELECT + HIGHLIGHT
+        onTap: () {
+          setState(() {
+            selectedClip = int.tryParse(item.id);
+            playheadPosition = item.startTime + const Duration(milliseconds: 100);
+            timelineOffset = playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
+          });
+          _updatePreview(); // This highlights preview
+        },
+        child: Container(
+          width: width,
+          height: 70,
+          margin: const EdgeInsets.only(right: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: selected ? Border.all(color: const Color(0xFF00D9FF), width: 3) : null,
+            boxShadow: selected
+                ? [BoxShadow(color: const Color(0xFF00D9FF).withOpacity(0.4), blurRadius: 12)]
+                : null,
           ),
-
-          // Trim handles (left and right)
-          if (selected) ...[
-            _buildLeftTrimHandle(item, minDuration),
-            _buildRightTrimHandle(item, minDuration),
-          ],
-        ],
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: _buildThumbnailStrip(item),
+          ),
+        ),
       ),
     );
   }
@@ -1976,22 +1918,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 // Helper to build thumbnail strip for timeline
   Widget _buildThumbnailStrip(TimelineItem item) {
     if (item.thumbnailBytes == null || item.thumbnailBytes!.isEmpty) {
-      return Container(
-        color: const Color(0xFF2A2A2A),
-        child: const Center(child: Icon(Icons.videocam_off, color: Colors.white54)),
-      );
+      return Container(color: const Color(0xFF2A2A2A));
     }
 
-    // THIS IS THE ONLY FIX YOU NEED:
     return Row(
       children: List.generate(10, (i) {
         final bytes = item.thumbnailBytes![i % item.thumbnailBytes!.length];
-        return Expanded(  // ← Keep Expanded! It was correct
+        return Expanded(
           child: Image.memory(
             bytes,
             fit: BoxFit.cover,
             gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => Container(color: Colors.grey[800]),
           ),
         );
       }),
@@ -2026,15 +1963,23 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   Widget _buildCoverButton() {
-    TimelineItem? selectedItem;
-    if (selectedClip != null) {
-      for (final clip in clips) {
-        if (int.tryParse(clip.id) == selectedClip) {
-          selectedItem = clip;
-          break;
-        }
+    // Show current frame from active video controller
+    Uint8List? coverBytes;
+    if (_activeVideoController != null &&
+        _activeVideoController!.value.isInitialized &&
+        _activeVideoController!.value.size.width > 100) {
+      // We'll use the first thumbnail as cover (closest to current position
+      final active = _findActiveVideo();
+      if (active != null && active.thumbnailBytes?.isNotEmpty == true) {
+        final index = ((playheadPosition - active.startTime).inMilliseconds /
+            active.duration.inMilliseconds *
+            active.thumbnailBytes!.length)
+            .clamp(0, active.thumbnailBytes!.length - 1)
+            .floor();
+        coverBytes = active.thumbnailBytes![index];
       }
     }
+
     return GestureDetector(
       onTap: () => _showCoverSelector(),
       child: Container(
@@ -2047,13 +1992,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (selectedItem != null && selectedItem.thumbnailPaths.isNotEmpty)
+            if (coverBytes != null)
               ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(8),
-                ),
-                child: Image.file(
-                  File(selectedItem.thumbnailPaths.first),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                child: Image.memory(
+                  coverBytes,
                   width: 50,
                   height: 40,
                   fit: BoxFit.cover,
@@ -2067,7 +2010,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                   color: Color(0xFF2A2A2A),
                   borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
                 ),
-                child: const Icon(Icons.edit, size: 18, color: Colors.white),
+                child: const Icon(Icons.photo, size: 18, color: Colors.white),
               ),
             const SizedBox(height: 2),
             const Text(
@@ -2092,6 +2035,15 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   Widget _buildAudioTrack() {
     final screenWidth = MediaQuery.of(context).size.width;
     final centerX = screenWidth / 2;
+
+    // Find selected video clip
+    final TimelineItem? selectedVideo = selectedClip != null
+        ? clips.firstWhereOrNull((c) => int.tryParse(c.id) == selectedClip)
+        : null;
+
+    final double? stretchWidth = selectedVideo != null
+        ? _clipWidth(selectedVideo) - 40
+        : null;
     return Container(
       height: 50,
       child: _clippedTrack(
@@ -2147,6 +2099,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                       ),
                       ...audioItems.map(
                         (audio) => _buildAudioClip(audio, centerX),
+                      ),
+                      Positioned(
+                        left: centerX + 30,
+                        top: 8,
+                        child: _stretchableTimelineButton(
+                          icon: Icons.audiotrack,
+                          label: 'Add audio',
+                          onTap: _addAudio,
+                          width: stretchWidth ?? 140, // fallback width
+                        ),
                       ),
                     ],
                   ),
@@ -2477,6 +2439,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   Widget _buildTextTrack() {
     final screenWidth = MediaQuery.of(context).size.width;
     final centerX = screenWidth / 2;
+    final TimelineItem? selectedVideo = selectedClip != null
+        ? clips.firstWhereOrNull((c) => int.tryParse(c.id) == selectedClip)
+        : null;
+
+    final double? stretchWidth = selectedVideo != null
+        ? _clipWidth(selectedVideo) - 40
+        : null;
     return Container(
       height: 50,
       child: _clippedTrack(
@@ -2531,9 +2500,61 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                         ),
                       ),
                       ...textItems.map((text) => _buildTextClip(text, centerX)),
+                      Positioned(
+                        left: centerX + 30,
+                        top: 8,
+                        child: _stretchableTimelineButton(
+                          icon: Icons.text_fields,
+                          label: 'Add text',
+                          onTap: _addText,
+                          width: stretchWidth ?? 140,
+                        ),
+                      ),
                     ],
                   ),
                 ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _stretchableTimelineButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    required double width,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: width,
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A1A1A).withOpacity(0.95),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: const Color(0xFF00D9FF), width: 2),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF00D9FF).withOpacity(0.4),
+              blurRadius: 12,
+              spreadRadius: 2,
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 22, color: const Color(0xFF00D9FF)),
+            const SizedBox(width: 12),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 15,
+                color: Color(0xFF00D9FF),
+                fontWeight: FontWeight.bold,
               ),
             ),
           ],
@@ -3121,95 +3142,103 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   void _showSpeedEditor() {
-    if (selectedClip == null) return;
-    TimelineItem? item = getSelectedItem();
-    if (item == null) return;
-    double temp = item.speed;
+    final item = getSelectedItem();
+    if (item == null || item.type != TimelineItemType.video) {
+      _showMessage('Select a video clip first');
+      return;
+    }
+
+    double tempSpeed = item.speed;
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1A1A1A),
-      builder:
-          (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Container(
-                  height: 300,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Speed',
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setM) => Container(
+          height: 380,
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            children: [
+              const Text(
+                'Speed',
+                style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                '${tempSpeed.toStringAsFixed(2)}x',
+                style: const TextStyle(color: Colors.white, fontSize: 48, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              Slider(
+                value: tempSpeed,
+                min: 0.25,
+                max: 4.0,
+                divisions: 15,
+                activeColor: const Color(0xFF00D9FF),
+                onChanged: (v) => setM(() => tempSpeed = v),
+              ),
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0].map((s) {
+                  final isSelected = (tempSpeed - s).abs() < 0.01;
+                  return GestureDetector(
+                    onTap: () => setM(() => tempSpeed = s),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isSelected ? const Color(0xFF00D9FF) : const Color(0xFF2A2A2A),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: isSelected ? Colors.transparent : Colors.white24),
+                      ),
+                      child: Text(
+                        '${s}x',
                         style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
+                          color: isSelected ? Colors.black : Colors.white,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      const SizedBox(height: 20),
-                      Text(
-                        '${temp.toStringAsFixed(2)}x',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                        ),
-                      ),
-                      Slider(
-                        value: temp,
-                        min: 0.25,
-                        max: 4,
-                        divisions: 15,
-                        activeColor: const Color(0xFF00D9FF),
-                        onChanged: (v) => setM(() => temp = v),
-                      ),
-                      const SizedBox(height: 16),
-                      Wrap(
-                        spacing: 8,
-                        children:
-                            [0.25, 0.5, 1.0, 2.0, 4.0].map((s) {
-                              return ElevatedButton(
-                                onPressed: () => setM(() => temp = s),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor:
-                                      temp == s
-                                          ? const Color(0xFF00D9FF)
-                                          : const Color(0xFF2A2A2A),
-                                  foregroundColor:
-                                      temp == s ? Colors.black : Colors.white,
-                                ),
-                                child: Text('${s}x'),
-                              );
-                            }).toList(),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          final oldDur = item!.duration;
-                          setState(() {
-                            item.speed = temp;
-                            item.duration = Duration(
-                              milliseconds:
-                                  (oldDur.inMilliseconds / temp).round(),
-                            );
-                          });
-                          Navigator.pop(ctx);
-                          _showMessage('Speed: ${temp.toStringAsFixed(2)}x');
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF00D9FF),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 32,
-                            vertical: 12,
-                          ),
-                        ),
-                        child: const Text(
-                          'Apply',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+                    ),
+                  );
+                }).toList(),
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2A2A2A)),
+                      child: const Text('Cancel', style: TextStyle(color: Colors.white)),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          final oldDuration = item.duration;
+                          item.speed = tempSpeed;
+                          // Recalculate duration based on speed
+                          item.duration = Duration(
+                            milliseconds: (oldDuration.inMilliseconds / tempSpeed).round(),
+                          );
+                        });
+                        Navigator.pop(ctx);
+                        _showMessage('Speed: ${tempSpeed.toStringAsFixed(2)}x');
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00D9FF)),
+                      child: const Text('Apply', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
+        ),
+      ),
     );
   }
 
@@ -4611,4 +4640,55 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
           ),
     );
   }
+
+  double _clipWidth(TimelineItem item) {
+    final secs = item.duration.inMilliseconds / 1000.0 / item.speed;
+    return (secs * pixelsPerSecond).clamp(60.0, double.infinity);
+  }
 }
+
+
+class _DurationRulerPainter extends CustomPainter {
+  final double totalSeconds, visibleSeconds, offsetSeconds, pixelsPerSecond;
+  final String Function(Duration) formatTime;
+
+  _DurationRulerPainter({
+    required this.totalSeconds,
+    required this.visibleSeconds,
+    required this.offsetSeconds,
+    required this.pixelsPerSecond,
+    required this.formatTime,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = Colors.white24;
+    final textPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    for (double s = (offsetSeconds - visibleSeconds / 2).floorToDouble();
+    s <= (offsetSeconds + visibleSeconds / 2).ceilToDouble();
+    s += 0.5) {
+      if (s < 0 || s > totalSeconds) continue;
+
+      final x = (s - offsetSeconds) * pixelsPerSecond + size.width / 2;
+
+      if (s % 1 == 0) {
+        canvas.drawLine(Offset(x, 30), Offset(x, 40), paint);
+        textPainter.text = TextSpan(
+          text: formatTime(Duration(seconds: s.toInt())),
+          style: const TextStyle(color: Colors.white70, fontSize: 11),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(x - textPainter.width / 2, 8));
+      } else {
+        canvas.drawLine(Offset(x, 35), Offset(x, 40), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter old) => true;
+}
+
+
+

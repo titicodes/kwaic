@@ -3203,7 +3203,6 @@ import 'nes_scr/screen/home_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'nes_scr/screen/nr.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();

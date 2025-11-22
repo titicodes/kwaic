@@ -15,7 +15,6 @@ class VideoSelectionScreen extends StatefulWidget {
 
 class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
   final List<XFile> _selectedVideos = [];
-  final Map<String, String?> _thumbnails = {};
   final Map<String, Duration?> _durations = {};
   bool _isLoading = false;
 
@@ -56,7 +55,6 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
       for (final video in videoFiles) {
         if (!_selectedVideos.any((v) => v.path == video.path)) {
           _selectedVideos.add(video);
-          await _generateThumbnail(video);
           await _getVideoDuration(video);
         }
       }
@@ -74,26 +72,7 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
     }
   }
 
-  Future<void> _generateThumbnail(XFile video) async {
-    try {
-      final dir = await getTemporaryDirectory();
-      final thumbnailPath = await VideoThumbnail.thumbnailFile(
-        video: video.path,
-        thumbnailPath: dir.path,
-        imageFormat: ImageFormat.PNG,
-        maxWidth: 200,
-        quality: 75,
-      );
 
-      if (mounted) {
-        setState(() {
-          _thumbnails[video.path] = thumbnailPath;
-        });
-      }
-    } catch (e) {
-      debugPrint('Error generating thumbnail: $e');
-    }
-  }
 
   Future<void> _getVideoDuration(XFile video) async {
     VideoPlayerController? controller;
@@ -117,8 +96,7 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
     setState(() {
       final video = _selectedVideos[index];
       _selectedVideos.removeAt(index);
-      _thumbnails.remove(video.path);
-      _durations.remove(video.path);
+          _durations.remove(video.path);
     });
   }
 
@@ -129,7 +107,7 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
-  void _navigateToEditor() {
+  void _navigateToEditor() async {
     if (_selectedVideos.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please select at least one video'), backgroundColor: Colors.orange),
@@ -137,16 +115,68 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
       return;
     }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => VideoEditorScreen(initialVideos: _selectedVideos),
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Color(0xFF8B5CF6)),
+            SizedBox(height: 16),
+            Text('Preparing videos...', style: TextStyle(color: Colors.white)),
+          ],
+        ),
       ),
-    ).then((_) {
-      // Optional: clear selection when coming back
-       setState(() => _selectedVideos.clear());
-    });
+    );
+
+    final List<XFile> safeVideos = [];
+
+    // ← THIS LINE WAS MISSING ←
+    final Directory appDir = await getTemporaryDirectory();
+
+    for (final video in _selectedVideos) {
+      try {
+        final bytes = await video.readAsBytes();
+        final String newPath = '${appDir.path}/video_${DateTime.now().millisecondsSinceEpoch}_${video.name}';
+        await File(newPath).writeAsBytes(bytes);
+        safeVideos.add(XFile(newPath));
+      } catch (e) {
+        debugPrint('Failed to copy video: $e');
+      }
+    }
+
+    // Close loading dialog
+    if (mounted) Navigator.of(context).pop();
+
+    if (safeVideos.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to prepare videos'), backgroundColor: Colors.red),
+        );
+      }
+      return;
+    }
+
+    // Navigate with permanent safe paths
+    if (mounted) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => VideoEditorScreen(initialVideos: safeVideos),
+        ),
+      ).then((_) {
+        // Optional: clear selection when returning
+        setState(() {
+          _selectedVideos.clear();
+          _durations.clear();
+        });
+      });
+    }
   }
+
+
 
   @override
   Widget build(BuildContext context) {
@@ -175,8 +205,7 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
               onPressed: () {
                 setState(() {
                   _selectedVideos.clear();
-                  _thumbnails.clear();
-                  _durations.clear();
+                                   _durations.clear();
                 });
               },
               child: const Text(
@@ -253,61 +282,34 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
               itemCount: _selectedVideos.length,
               itemBuilder: (context, index) {
                 final video = _selectedVideos[index];
-                final thumbnail = _thumbnails[video.path];
                 final duration = _durations[video.path];
 
                 return Stack(
                   children: [
-                    // Video thumbnail
                     Container(
                       decoration: BoxDecoration(
-                        color: Colors.grey[300],
+                        color: Colors.grey[800],
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: thumbnail != null
-                            ? Image.file(
-                          File(thumbnail),
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                          height: double.infinity,
-                        )
-                            : const Center(
-                          child: Icon(
-                            Icons.video_library,
-                            color: Colors.white,
-                            size: 40,
-                          ),
-                        ),
+                      child: const Center(
+                        child: Icon(Icons.video_library, color: Colors.white70, size: 40),
                       ),
                     ),
-
-                    // Index badge
                     Positioned(
                       top: 8,
                       left: 8,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
                           color: const Color(0xFF8B5CF6),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Text(
                           '${index + 1}',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                          ),
+                          style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
                         ),
                       ),
                     ),
-
-                    // Remove button
                     Positioned(
                       top: 8,
                       right: 8,
@@ -315,40 +317,21 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
                         onTap: () => _removeVideo(index),
                         child: Container(
                           padding: const EdgeInsets.all(4),
-                          decoration: const BoxDecoration(
-                            color: Colors.black54,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.close,
-                            color: Colors.white,
-                            size: 16,
-                          ),
+                          decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                          child: const Icon(Icons.close, color: Colors.white, size: 16),
                         ),
                       ),
                     ),
-
-                    // Duration
                     if (duration != null)
                       Positioned(
                         bottom: 8,
                         right: 8,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black87,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                          decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(4)),
                           child: Text(
                             _formatDuration(duration),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w500,
-                            ),
+                            style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w500),
                           ),
                         ),
                       ),
@@ -433,15 +416,6 @@ class _VideoSelectionScreenState extends State<VideoSelectionScreen> {
   @override
   void dispose() {
     // Clean up thumbnails
-    for (final path in _thumbnails.values) {
-      if (path != null) {
-        try {
-          File(path).deleteSync();
-        } catch (e) {
-          debugPrint('Error deleting thumbnail: $e');
-        }
-      }
-    }
     super.dispose();
   }
 }

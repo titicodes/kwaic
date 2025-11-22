@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'dart:io';
 
@@ -26,6 +27,7 @@ class TimelineItem {
   List<double>? waveformData;
   List<Keyframe> keyframes;
   int trackIndex;
+  List<Uint8List>? thumbnailBytes; // field
 
   // Keyframe end values
   double? endX;
@@ -34,10 +36,10 @@ class TimelineItem {
   double? endRotation;
 
   // Crop values
-  double cropLeft = 0.0;
-  double cropTop = 0.0;
-  double cropRight = 0.0;
-  double cropBottom = 0.0;
+  double cropLeft;
+  double cropTop;
+  double cropRight;
+  double cropBottom;
 
   // NEW: Layer index for multi-track layering
   int? layerIndex;
@@ -65,6 +67,7 @@ class TimelineItem {
     this.waveformData,
     this.keyframes = const [],
     this.trackIndex = 0,
+    this.thumbnailBytes, // <-- add here
     this.endX,
     this.endY,
     this.endScale,
@@ -73,7 +76,7 @@ class TimelineItem {
     this.cropTop = 0.0,
     this.cropRight = 0.0,
     this.cropBottom = 0.0,
-    this.layerIndex, // ADD THIS LINE
+    this.layerIndex,
   })  : trimStart = trimStart ?? Duration.zero,
         trimEnd = trimEnd ?? originalDuration,
         thumbnailPaths = thumbnailPaths ?? [];
@@ -101,6 +104,7 @@ class TimelineItem {
     List<double>? waveformData,
     List<Keyframe>? keyframes,
     int? trackIndex,
+    List<Uint8List>? thumbnailBytes, // <-- add here
     double? endX,
     double? endY,
     double? endScale,
@@ -109,7 +113,7 @@ class TimelineItem {
     double? cropTop,
     double? cropRight,
     double? cropBottom,
-    int? layerIndex, // ADD THIS IN copyWith TOO
+    int? layerIndex,
   }) {
     return TimelineItem(
       id: id ?? this.id,
@@ -134,6 +138,7 @@ class TimelineItem {
       waveformData: waveformData ?? this.waveformData,
       keyframes: keyframes ?? this.keyframes,
       trackIndex: trackIndex ?? this.trackIndex,
+      thumbnailBytes: thumbnailBytes ?? this.thumbnailBytes, // copy here
       endX: endX ?? this.endX,
       endY: endY ?? this.endY,
       endScale: endScale ?? this.endScale,
@@ -142,7 +147,7 @@ class TimelineItem {
       cropTop: cropTop ?? this.cropTop,
       cropRight: cropRight ?? this.cropRight,
       cropBottom: cropBottom ?? this.cropBottom,
-      layerIndex: layerIndex ?? this.layerIndex, // COPY IT HERE
+      layerIndex: layerIndex ?? this.layerIndex,
     );
   }
 }
@@ -170,7 +175,5 @@ extension DurationMath on Duration {
 }
 
 extension TimelineItemFileName on TimelineItem {
-  /// Returns the file name without the path.
-  /// If the file is null we return a fallback string.
   String get fileName => file?.path.split(Platform.pathSeparator).last ?? 'Media';
 }

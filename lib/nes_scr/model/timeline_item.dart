@@ -2,6 +2,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'dart:io';
 
+import 'package:kwaic/nes_scr/model/speed_point.dart';
+
 enum TimelineItemType { video, audio, image, text }
 
 class TimelineItem {
@@ -13,7 +15,6 @@ class TimelineItem {
   Duration originalDuration;
   Duration trimStart;
   Duration trimEnd;
-  double speed;
   double volume;
   String? text;
   Color? textColor;
@@ -44,6 +45,12 @@ class TimelineItem {
   // NEW: Layer index for multi-track layering
   int? layerIndex;
 
+  double speed = 1.0;
+  List<SpeedPoint> speedPoints = [
+    SpeedPoint(time: 0.0, speed: 1.0),
+    SpeedPoint(time: 1.0, speed: 1.0),
+  ];
+
   TimelineItem({
     required this.id,
     required this.type,
@@ -67,7 +74,7 @@ class TimelineItem {
     this.waveformData,
     this.keyframes = const [],
     this.trackIndex = 0,
-    this.thumbnailBytes, // <-- add here
+    this.thumbnailBytes,
     this.endX,
     this.endY,
     this.endScale,
@@ -77,9 +84,15 @@ class TimelineItem {
     this.cropRight = 0.0,
     this.cropBottom = 0.0,
     this.layerIndex,
+    List<SpeedPoint>? speedPoints, // Make this nullable in the constructor
   })  : trimStart = trimStart ?? Duration.zero,
         trimEnd = trimEnd ?? originalDuration,
-        thumbnailPaths = thumbnailPaths ?? [];
+        thumbnailPaths = thumbnailPaths ?? [],
+        speedPoints = speedPoints ?? [
+          SpeedPoint(time: 0.0, speed: 1.0),
+          SpeedPoint(time: 1.0, speed: 1.0),
+        ]; // Provide a default non-null value
+
 
   TimelineItem copyWith({
     String? id,
@@ -114,6 +127,7 @@ class TimelineItem {
     double? cropRight,
     double? cropBottom,
     int? layerIndex,
+    List<SpeedPoint>? speedPoints,
   }) {
     return TimelineItem(
       id: id ?? this.id,
@@ -148,6 +162,7 @@ class TimelineItem {
       cropRight: cropRight ?? this.cropRight,
       cropBottom: cropBottom ?? this.cropBottom,
       layerIndex: layerIndex ?? this.layerIndex,
+      speedPoints: speedPoints ?? this.speedPoints,
     );
   }
 }

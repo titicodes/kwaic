@@ -61,6 +61,8 @@ dependencies:
   video_editor: ^3.0.0
   transparent_image: ^2.0.1
   reorderables: ^0.6.0
+  flutter_gpu_video_filters: ^0.0.20
+  native_filters: ^0.0.15+alpha
   #ffmpeg_kit_flutter: ^5.1.0
 
 dev_dependencies:

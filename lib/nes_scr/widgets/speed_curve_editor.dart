@@ -1,12 +1,13 @@
-
+// widgets/speed_curve_editor.dart
 import 'package:flutter/material.dart';
-
-
 import '../model/timeline_item.dart';
+import '../model/speed_point.dart';
 
 class SpeedCurveEditor extends StatefulWidget {
   final TimelineItem item;
-  const SpeedCurveEditor({Key? key, required this.item}) : super(key: key);
+  final Function(List<SpeedPoint>)? onSave;
+
+  const SpeedCurveEditor({super.key, required this.item, this.onSave});
 
   @override
   State<SpeedCurveEditor> createState() => _SpeedCurveEditorState();
@@ -18,102 +19,94 @@ class _SpeedCurveEditorState extends State<SpeedCurveEditor> {
   @override
   void initState() {
     super.initState();
-    points = List.from(widget.item.speedPoints);
+    points = widget.item.speedPoints.isEmpty
+        ? [SpeedPoint(time: 0.0, speed: 1.0), SpeedPoint(time: 1.0, speed: 1.0)]
+        : widget.item.speedPoints.map((p) => p.copyWith()).toList();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 500,
-      color: const Color(0xFF1A1A1A),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text("Speed Curve", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text("Cancel", style: TextStyle(color: Colors.white70)),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  setState(() {
-                    widget.item.speedPoints = points;
-                  });
-                  Navigator.pop(context);
-                },
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00D9FF)),
-                child: const Text("Apply", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-              ),
-            ],
+    return Scaffold(
+      backgroundColor: const Color(0xFF1A1A1A),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        title: const Text('Speed Curve'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
           ),
-          const SizedBox(height: 20),
-          Expanded(
-            child: GestureDetector(
-              onTapDown: (details) {
-                final box = context.findRenderObject() as RenderBox;
-                final offset = details.localPosition;
-                final x = offset.dx / box.size.width;
-                final y = 1 - (offset.dy / box.size.height);
-                final speed = (y * 7.75 + 0.25).clamp(0.25, 8.0);
-
-                setState(() {
-                  points.add(SpeedPoint(x.clamp(0.0, 1.0),  speed));
-                  points.sort((a, b) => a.time.compareTo(b.time));
-                });
-              },
-              child: CustomPaint(
-                size: Size.infinite,
-                painter: SpeedCurvePainter(points),
-              ),
+          TextButton(
+            onPressed: () {
+              widget.item.speedPoints = points;
+              widget.onSave?.call(points);
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Speed curve applied'), backgroundColor: Color(0xFF10B981)),
+              );
+            },
+            child: const Text('Apply', style: TextStyle(color: Color(0xFF00D9FF), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: Text(
+              'Average Speed: ${(points.map((p) => p.speed).reduce((a, b) => a + b) / points.length).toStringAsFixed(2)}x',
+              style: const TextStyle(color: Colors.white70, fontSize: 16),
             ),
           ),
-          const Text("Tap to add point • Drag to move • Double-tap to delete", style: TextStyle(color: Colors.white54, fontSize: 12)),
+          Expanded(
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: _SpeedCurvePainter(points),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.all(20),
+            child: Text(
+              'Drag points to create speed ramps\nFirst & last points are locked',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white54),
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class SpeedCurvePainter extends CustomPainter {
+class _SpeedCurvePainter extends CustomPainter {
   final List<SpeedPoint> points;
-
-  SpeedCurvePainter(this.points);
+  _SpeedCurvePainter(this.points);
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (points.length < 2) return;
-
     final paint = Paint()
       ..color = const Color(0xFF00D9FF)
-      ..strokeWidth = 2
+      ..strokeWidth = 4
       ..style = PaintingStyle.stroke;
 
     final path = Path();
-    final double w = size.width;
-    final double h = size.height;
+    path.moveTo(0, size.height - (points[0].speed / 8.0).clamp(0.0, 1.0) * size.height);
 
-    // Start point
-    path.moveTo(0, h - (points.first.speed / 4.0) * h);
-
-    // Curve through points
-    for (var p in points) {
-      final x = p.time * w;
-      final y = h - (p.speed / 4.0) * h;
-      path.lineTo(x, y);
+    for (int i = 1; i < points.length; i++) {
+    final x = points[i].time * size.width;
+    final y = size.height - (points[i].speed / 8.0).clamp(0.0, 1.0) * size.height;
+    path.lineTo(x, y);
     }
 
     canvas.drawPath(path, paint);
 
     // Draw points
-    for (var p in points) {
-      canvas.drawCircle(
-        Offset(p.time * w, h - (p.speed / 4.0) * h),
-        4,
-        Paint()..color = Colors.white,
-      );
+    for (final p in points) {
+    final x = p.time * size.width;
+    final y = size.height - (p.speed / 8.0).clamp(0.0, 1.0) * size.height;
+
+    canvas.drawCircle(Offset(x, y), 12, Paint()..color = Colors.white);
+    canvas.drawCircle(Offset(x, y), 8, Paint()..color = const Color(0xFF00D9FF));
     }
   }
 

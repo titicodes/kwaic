@@ -1,18 +1,16 @@
+// widgets/keyframe_animation_editor.dart
 import 'package:flutter/material.dart';
-
 import '../model/keyframe.dart';
 import '../model/timeline_item.dart';
 
 class KeyframeAnimationEditor extends StatefulWidget {
   final TimelineItem item;
-  final VoidCallback onSave;        // To call _saveToHistory()
-  final Function(String) showMessage; // To call _showMessage()
+  final VoidCallback? onUpdate; // Optional now
 
   const KeyframeAnimationEditor({
     super.key,
     required this.item,
-    required this.onSave,
-    required this.showMessage,
+    this.onUpdate,
   });
 
   @override
@@ -25,32 +23,22 @@ class _KeyframeAnimationEditorState extends State<KeyframeAnimationEditor> {
   @override
   void initState() {
     super.initState();
-    // Deep copy keyframes
-    keyframes = widget.item.keyframes.map((k) => Keyframe(
-      time: k.time,
-      x: k.x,
-      y: k.y,
-      scale: k.scale,
-      rotation: k.rotation,
-      opacity: k.opacity,
-    )).toList();
-
-    // Ensure we have at least 2 keyframes
-    if (keyframes.isEmpty) {
-      keyframes = [
-        Keyframe(time: 0.0, x: widget.item.x ?? 100, y: widget.item.y ?? 200, scale: widget.item.scale, rotation: widget.item.rotation, opacity: 1.0),
-        Keyframe(time: 1.0, x: widget.item.x ?? 100, y: widget.item.y ?? 200, scale: widget.item.scale, rotation: widget.item.rotation, opacity: 1.0),
-      ];
-    }
+    keyframes = widget.item.keyframes.isEmpty
+        ? [
+      Keyframe(time: 0.0, x: widget.item.x ?? 100, y: widget.item.y ?? 200, scale: widget.item.scale, rotation: widget.item.rotation, opacity: 1.0),
+      Keyframe(time: 1.0, x: widget.item.x ?? 100, y: widget.item.y ?? 200, scale: widget.item.scale, rotation: widget.item.rotation, opacity: 1.0),
+    ]
+        : widget.item.keyframes.map((k) => k.copyWith()).toList();
   }
 
-  Keyframe _getCurrentKeyframe() {
-    // This is just for preview — we use playhead from parent
-    final progress = 0.5; // You can pass playhead later if needed
+  Keyframe _getInterpolated(double progress) {
+    if (keyframes.length == 1) return keyframes[0];
     for (int i = 0; i < keyframes.length - 1; i++) {
-      if (progress >= keyframes[i].time && progress <= keyframes[i + 1].time) {
-        final t = (progress - keyframes[i].time) / (keyframes[i + 1].time - keyframes[i].time);
-        return keyframes[i].lerp(keyframes[i + 1], t);
+      final a = keyframes[i];
+      final b = keyframes[i + 1];
+      if (progress <= b.time) {
+        final t = (progress - a.time) / (b.time - a.time);
+        return a.lerp(b, t);
       }
     }
     return keyframes.last;
@@ -58,74 +46,61 @@ class _KeyframeAnimationEditorState extends State<KeyframeAnimationEditor> {
 
   @override
   Widget build(BuildContext context) {
-    final current = keyframes.last; // We're editing the END keyframe (most common)
+    final end = keyframes.last;
 
-    return Column(
-      children: [
-        const Padding(
-          padding: EdgeInsets.only(top: 20, bottom: 10),
-          child: Text('Keyframe Animation', style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-        ),
-        const Text('Adjust the END values → animation plays from start to end', style: TextStyle(color: Colors.white54, fontSize: 13)),
-        const SizedBox(height: 20),
-
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            children: [
-              _slider('X Position', current.x ?? 100, -500, 1000, (v) => setState(() => keyframes[1] = keyframes[1].copyWith(x: v))),
-              _slider('Y', current.y ?? 200, -500, 1000, (v) => setState(() => keyframes[1] = keyframes[1].copyWith(y: v))),
-              _slider('Scale', current.scale ?? 1.0, 0.1, 8.0, (v) => setState(() => keyframes[1] = keyframes[1].copyWith(scale: v))),
-              _slider('Rotation (°)', current.rotation ?? 0, -360, 360, (v) => setState(() => keyframes[1] = keyframes[1].copyWith(rotation: v))),
-              _slider('Opacity', current.opacity ?? 1.0, 0.0, 1.0, (v) => setState(() => keyframes[1] = keyframes[1].copyWith(opacity: v))),
-            ],
+    return Scaffold(
+      backgroundColor: const Color(0xFF1A1A1A),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        title: const Text('Keyframe Animation'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
           ),
-        ),
+          TextButton(
+            onPressed: () {
+              widget.item.keyframes = keyframes;
+              // Apply final values for live preview
+              widget.item.x = end.x;
+              widget.item.y = end.y;
+              widget.item.scale = end.scale ?? 1.0;
+              widget.item.rotation = end.rotation ?? 0.0;
+              widget.item.opacity = end.opacity ?? 1.0;
 
-        Padding(
-          padding: const EdgeInsets.all(20),
-          child: Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () {
-                    widget.onSave(); // This calls _saveToHistory() from parent
-                    setState(() {
-                      widget.item.keyframes = keyframes;
-                      // Apply final values for preview
-                      widget.item.x = keyframes.last.x;
-                      widget.item.y = keyframes.last.y;
-                      widget.item.scale = keyframes.last.scale ?? 1.0;
-                      widget.item.rotation = keyframes.last.rotation ?? 0;
-                    });
-                    widget.showMessage('Animation applied');
-                    Navigator.pop(context);
-                  },
-                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00D9FF)),
-                  child: const Text('Apply', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                ),
-              ),
-            ],
+              widget.onUpdate?.call();
+              if (mounted) setState(() {});
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Animation applied'), backgroundColor: Color(0xFF10B981)),
+              );
+            },
+            child: const Text('Apply', style: TextStyle(color: Color(0xFF00D9FF), fontWeight: FontWeight.bold)),
           ),
-        ),
-      ],
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          const Text('End State (animation goes from start → end)', style: TextStyle(color: Colors.white70, fontSize: 14)),
+          const SizedBox(height: 24),
+          _slider('X Position', end.x ?? 100, -500, 1000, (v) => setState(() => keyframes[keyframes.length - 1] = keyframes.last.copyWith(x: v))),
+          _slider('Y Position', end.y ?? 200, -500, 1000, (v) => setState(() => keyframes[keyframes.length - 1] = keyframes.last.copyWith(y: v))),
+          _slider('Scale', end.scale ?? 1.0, 0.1, 8.0, (v) => setState(() => keyframes.last = keyframes.last.copyWith(scale: v))),
+          _slider('Rotation (°)', end.rotation ?? 0, -360, 360, (v) => setState(() => keyframes.last = keyframes.last.copyWith(rotation: v))),
+          _slider('Opacity', end.opacity ?? 1.0, 0.0, 1.0, (v) => setState(() => keyframes.last = keyframes.last.copyWith(opacity: v))),
+        ],
+      ),
     );
   }
 
   Widget _slider(String label, double value, double min, double max, Function(double) onChange) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('$label: ${value.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 15)),
+          Text('$label: ${value.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 16)),
           Slider(
             value: value.clamp(min, max),
             min: min,

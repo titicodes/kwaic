@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'dart:io';
 
@@ -10,12 +11,30 @@ import 'package:flutter/material.dart';
 
 import 'keyframe.dart';
 
-enum TimelineItemType { video, audio, image, text }
+enum TimelineItemType { video, audio, image, text, overlay, stickers }
 
+// model/speed_point.dart
 class SpeedPoint {
-  final double time;
-  final double speed;
-  SpeedPoint(this.time, this.speed);
+  final double time; // 0.0 to 1.0
+  final double speed; // e.g. 0.5x, 2.0x
+
+  SpeedPoint({required this.time, required this.speed});
+
+  SpeedPoint copyWith({double? time, double? speed}) {
+    return SpeedPoint(time: time ?? this.time, speed: speed ?? this.speed);
+  }
+}
+
+enum BottomNavMode {
+  normal,
+  edit,
+  audio,
+  text,
+  stickers,
+  overlay,
+  effects,
+  filters,
+  animation,
 }
 
 class TimelineItem {
@@ -29,6 +48,10 @@ class TimelineItem {
   Duration trimEnd;
   double speed;
   double volume;
+  bool? flipHorizontal;
+  bool? flipVertical;
+  String? animationIn;
+  List<ui.Image>? thumbnailImages;
 
   // Video/Image properties
   List<Uint8List>? thumbnailBytes;
@@ -48,6 +71,9 @@ class TimelineItem {
   Color? textColor;
   double? fontSize;
   String? fontFamily;
+  double? opacity;
+
+
 
   // Position
   double? x;
@@ -103,10 +129,16 @@ class TimelineItem {
     this.cropWidth,
     this.cropHeight,
     List<SpeedPoint>? speedPoints,
-    this.keyframes = const <Keyframe>[],  // <-- This should be a valid empty list of Keyframe
+    this.keyframes = const <Keyframe>[],
+    this.opacity,
+    bool? flipVertical,
+    bool? flipHorizontal,
+    this.animationIn,
+    this.thumbnailImages
   }) : trimEnd = trimEnd ?? duration,
-        speedPoints = speedPoints ?? [SpeedPoint(0, 1.0), SpeedPoint(1, 1.0)];
-
+       speedPoints =
+           speedPoints ??
+           [SpeedPoint(time: 0, speed: 1.0), SpeedPoint(time: 1, speed: 1.0)];
 
   TimelineItem copyWith({
     String? id,
@@ -145,6 +177,7 @@ class TimelineItem {
     double? cropWidth,
     double? cropHeight,
     List<Keyframe>? keyframes,
+    double? opacity,
   }) {
     return TimelineItem(
       id: id ?? this.id,
@@ -183,6 +216,10 @@ class TimelineItem {
       cropWidth: cropWidth ?? this.cropWidth,
       cropHeight: cropHeight ?? this.cropHeight,
       keyframes: keyframes ?? this.keyframes,
+      opacity: opacity ?? this.opacity,
+      flipHorizontal: flipHorizontal ?? this.flipHorizontal,
+      flipVertical: flipVertical ?? this.flipVertical,
+      thumbnailImages: thumbnailImages,
     );
   }
 
@@ -215,22 +252,30 @@ class TimelineItem {
       'cropY': cropY,
       'cropWidth': cropWidth,
       'cropHeight': cropHeight,
-      'keyframes': keyframes.map((k) => {
-        'time': k.time,
-        'x': k.x,
-        'y': k.y,
-        'scale': k.scale,
-        'rotation': k.rotation,
-        'opacity': k.opacity,
-      }).toList(),
+      'keyframes':
+      keyframes
+          .map(
+            (k) => {
+          'time': k.time,
+          'x': k.x,
+          'y': k.y,
+          'scale': k.scale,
+          'rotation': k.rotation,
+          'opacity': k.opacity,
+        },
+      )
+          .toList(),
+      // Optionally handle `thumbnailBytes` (list of Uint8List) instead of `thumbnailImages`
+      'thumbnailBytes': thumbnailBytes?.map((e) => e).toList(), // <-- store only byte data
     };
   }
+
 
   factory TimelineItem.fromJson(Map<String, dynamic> json) {
     return TimelineItem(
       id: json['id'],
       type: TimelineItemType.values.firstWhere(
-            (e) => e.toString() == json['type'],
+        (e) => e.toString() == json['type'],
       ),
       file: json['filePath'] != null ? File(json['filePath']) : null,
       startTime: Duration(milliseconds: json['startTime']),
@@ -257,30 +302,33 @@ class TimelineItem {
       cropY: json['cropY'],
       cropWidth: json['cropWidth'],
       cropHeight: json['cropHeight'],
-      keyframes: json['keyframes'] != null
-          ? (json['keyframes'] as List).map((k) => Keyframe(
-        time: k['time'],
-        x: k['x'],
-        y: k['y'],
-        scale: k['scale'],
-        rotation: k['rotation'],
-        opacity: k['opacity'],
-      )).toList()
-          : <Keyframe>[],
-
-
+      keyframes:
+          json['keyframes'] != null
+              ? (json['keyframes'] as List)
+                  .map(
+                    (k) => Keyframe(
+                      time: k['time'],
+                      x: k['x'],
+                      y: k['y'],
+                      scale: k['scale'],
+                      rotation: k['rotation'],
+                      opacity: k['opacity'],
+                    ),
+                  )
+                  .toList()
+              : <Keyframe>[],
     );
   }
 }
-
 
 extension DurationMath on Duration {
   Duration multiply(double factor) =>
       Duration(milliseconds: (inMilliseconds * factor).round());
 
-  Duration divide(double divisor) => divisor == 0
-      ? this
-      : Duration(milliseconds: (inMilliseconds / divisor).round());
+  Duration divide(double divisor) =>
+      divisor == 0
+          ? this
+          : Duration(milliseconds: (inMilliseconds / divisor).round());
 
   Duration clamp(Duration min, Duration max) {
     if (this < min) return min;
@@ -290,5 +338,6 @@ extension DurationMath on Duration {
 }
 
 extension TimelineItemFileName on TimelineItem {
-  String get fileName => file?.path.split(Platform.pathSeparator).last ?? 'Media';
+  String get fileName =>
+      file?.path.split(Platform.pathSeparator).last ?? 'Media';
 }

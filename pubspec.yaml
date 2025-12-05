@@ -43,6 +43,8 @@ dependencies:
   reorderables: ^0.6.0
   lottie: ^3.3.1
   shared_preferences: ^2.5.3
+
+
   #flutter_gpu_video_filters: ^0.0.20
   #native_filters: ^0.0.15+alpha
   #ffmpeg_kit_flutter: ^5.1.0

@@ -18,11 +18,13 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 
 import '../model/clip_selection_state.dart';
 import '../model/debouncer.dart';
+import '../model/edit_context.dart';
 import '../model/eitor_state.dart';
 import '../model/keyframe.dart';
 import '../model/timeline_item.dart';
 import '../model/timeline_track.dart';
 import '../model/video_transition.dart';
+import '../servuices/audio_video_sync.dart';
 import '../servuices/autosave_manager.dart';
 import '../servuices/background_export_service.dart';
 import '../servuices/cloud_save_service.dart';
@@ -100,15 +102,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   String? currentTool;
   bool _isDraggingClip = false;
-  bool _isResizingOverlay = false;
-  Offset? _overlayDragStart;
-  double _videoTrackWidth = 0.0;
-  double _audioTrackWidth = 0.0;
-  double _textTrackWidth = 0.0;
+
 
   final Map<int, VideoTransition> clipTransitions = {};
   bool _isBottomNavCollapsed = false;
-  String? _selectedClipId;
 
   // Crop system — normalized values (0.0 to 1.0)
   double cropX = 0.0;
@@ -129,17 +126,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   final ScrollController _timelineScrollController = ScrollController();
   final ScrollController _editToolsScrollController = ScrollController();
-  bool _isBottomNavVisible = true; // Toggle hide/show
-  bool _isImmersiveMode = false; // Fullscreen preview
+
 
   late AnimationController _bottomNavAnimController;
   late Animation<double> _bottomNavHeightAnim;
   late AnimationController _previewAnimationController;
-
-  // Context toolbar state
-  TimelineItem? _selectedTimelineItem; // null = global tools
-  String? _selectedToolCategory;
-  bool _showContextToolbar = true;
 
   late ScrollController timelineController;
 
@@ -154,8 +145,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   final DraggableScrollableController _draggableController =
       DraggableScrollableController();
 
-  bool _isBottomNavExpanded = true;
-  bool _showEditTools = false;
 
   ClipSelectionState _selection = ClipSelectionState();
   BottomNavMode _currentNavMode = BottomNavMode.normal;
@@ -167,6 +156,9 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   late Debouncer _previewDebouncer;
   bool _isPreviewReady = false;
+  late AudioVideoSync _audioSync;
+  final EditingContext _editingContext = EditingContext();
+
 
   @override
   void initState() {
@@ -178,6 +170,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     historyManager = HistoryManager();
 
     _previewDebouncer = Debouncer(milliseconds: 50);
+    _audioSync = AudioVideoSync(_audioControllers, audioItems);
 
     // Dummy controller
     _activeVideoController = VideoPlayerController.file(File(''))
@@ -236,21 +229,19 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     try {
       Duration currentStart = Duration.zero;
+
       for (var video in widget.initialVideos!) {
         final path = video.path;
         final controller = VideoPlayerController.file(File(path));
+
         await controller.initialize();
 
-        await controller.seekTo(const Duration(milliseconds: 100));
-        await controller.play();
-        await Future.delayed(const Duration(milliseconds: 50));
-        await controller.pause();
-
-        // Optional: seek back to start if you want to show the very first frame
+        // Simple frame display - just seek and wait
+        await controller.seekTo(const Duration(milliseconds: 50));
+        await Future.delayed(const Duration(milliseconds: 100));
         await controller.seekTo(Duration.zero);
 
         final duration = controller.value.duration;
-
         final thumbs = await _generateRobustThumbnails(path, duration);
 
         final item = TimelineItem(
@@ -285,28 +276,39 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
-  void _switchToClip(TimelineItem item) async {
+// 4. FIXED: Smooth clip switching with proper sync
+  Future<void> _switchToClip(TimelineItem item) async {
     final ctrl = _controllers[item.id];
-    if (ctrl == null) return;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
 
     _activeVideoController = ctrl;
     _activeItem = item;
 
-    // Force real frame
-    await ctrl.seekTo(const Duration(milliseconds: 100));
-    await ctrl.play();
-    await Future.delayed(const Duration(milliseconds: 50));
-    await ctrl.pause();
-
-    // Go to correct time
-    final localTime = (playheadPosition - item.startTime).clamp(
-      Duration.zero,
-      item.duration,
+    final local = (playheadPosition - item.startTime).clamp(Duration.zero, item.duration);
+    final sourcePos = item.trimStart + Duration(
+      milliseconds: (local.inMilliseconds / item.speed).round(),
     );
-    final posMs = (item.trimStart + localTime).inMilliseconds;
-    await ctrl.seekTo(Duration(milliseconds: posMs));
 
-    setState(() {});
+    // CRITICAL FIX: Set volume and speed BEFORE any seeking
+    final targetSpeed = getCurrentSpeed(item, local).clamp(0.25, 2.0);
+
+    try {
+      await ctrl.setVolume(item.volume);
+      await ctrl.setPlaybackSpeed(targetSpeed);
+      await Future.delayed(const Duration(milliseconds: 20)); // Let it stabilize
+
+      await ctrl.seekTo(sourcePos);
+
+      if (isPlaying) {
+        await ctrl.play();
+      } else {
+        await Future.delayed(const Duration(milliseconds: 30));
+      }
+    } catch (e) {
+      debugPrint('Switch error: $e');
+    }
+
+    if (mounted) setState(() {});
   }
 
   Future<List<Uint8List>> _generateRobustThumbnails(
@@ -381,7 +383,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   Future<List<Uint8List>> _generateFallbackThumbnails(
     String videoPath,
     Duration duration,
-  ) async {
+  )
+  async {
     final List<Uint8List> thumbs = [];
     final ms = duration.inMilliseconds;
     final count = (duration.inSeconds / 2).clamp(8.0, 25.0).toInt();
@@ -400,43 +403,67 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return thumbs;
   }
 
-  void togglePlayPause() {
+// 7. FIXED: Toggle play/pause with proper state management
+  void togglePlayPause() async {
+    if (_activeVideoController == null ||
+        !_activeVideoController!.value.isInitialized) {
+      _showMessage('No video loaded');
+      return;
+    }
+
     setState(() => isPlaying = !isPlaying);
+
     if (isPlaying) {
       _lastFrameTime = DateTime.now().millisecondsSinceEpoch;
-      if (!_playbackTicker.isActive) _playbackTicker.start();
-      _activeVideoController?.play();
+
+      // Ensure correct position and settings BEFORE playing
+      await _updatePreviewImmediate();
+      await Future.delayed(const Duration(milliseconds: 30));
+
+      await _activeVideoController!.play();
+
+      if (!_playbackTicker.isActive) {
+        _playbackTicker.start();
+      }
     } else {
       _playbackTicker.stop();
-      _activeVideoController?.pause();
-      _updatePreview();
+      await _activeVideoController!.pause();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _updatePreviewImmediate();
     }
   }
 
   @override
   void dispose() {
+    isPlaying = false;
     _playbackTicker.stop();
     _playbackTicker.dispose();
-    thumbnailNotifier.dispose();
-    _bottomNavAnimController.dispose();
-    _timelineScrollController.dispose();
-    _previewAnimationController.dispose();
-    timelineController.dispose();
-    _toolPanelController.dispose();
-    _draggableController.dispose();
-    _previewDebouncer.dispose();
 
     for (final controller in _controllers.values) {
-      controller.dispose();
+      try {
+        controller.dispose();
+      } catch (e) {
+        debugPrint('Controller disposal error: $e');
+      }
     }
     _controllers.clear();
 
     for (final controller in _audioControllers.values) {
-      controller.dispose();
+      try {
+        controller.dispose();
+      } catch (e) {
+        debugPrint('Audio controller disposal error: $e');
+      }
     }
     _audioControllers.clear();
 
+    thumbnailNotifier.dispose();
+    _timelineScrollController.dispose();
+    _toolPanelController.dispose();
+    _draggableController.dispose();
+    _previewDebouncer.dispose();
     autosaveManager.stop();
+
     super.dispose();
   }
 
@@ -485,25 +512,71 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
+// 6. FIXED: Smooth playback frame update
   void _playbackFrame(Duration elapsed) {
     if (!mounted || !isPlaying) return;
+
     final now = DateTime.now().millisecondsSinceEpoch;
     final deltaMs = now - _lastFrameTime;
     _lastFrameTime = now;
+
     if (deltaMs <= 0 || deltaMs > 100) return;
 
     setState(() {
       playheadPosition += Duration(milliseconds: deltaMs);
-      final max = _getTotalDuration();
-      if (playheadPosition.inMilliseconds >= max * 1000) {
-        playheadPosition = Duration(milliseconds: (max * 1000).toInt());
+
+      final maxDuration = Duration(
+        milliseconds: (_getTotalDuration() * 1000).toInt(),
+      );
+
+      if (playheadPosition >= maxDuration) {
+        playheadPosition = maxDuration;
         isPlaying = false;
         _playbackTicker.stop();
+        _activeVideoController?.pause();
+        return;
       }
-      timelineOffset =
-          (playheadPosition.inMilliseconds / 1000 * pixelsPerSecond).toDouble();
+
+      final targetOffset =
+          (playheadPosition.inMilliseconds / 1000 * pixelsPerSecond) -
+              (MediaQuery.of(context).size.width / 2);
+
+      if (_timelineScrollController.hasClients) {
+        _timelineScrollController.jumpTo(
+          targetOffset.clamp(
+            0.0,
+            _timelineScrollController.position.maxScrollExtent,
+          ),
+        );
+      }
     });
+
     _updatePreview();
+    _playAudioTracks();
+  }
+
+// Play audio tracks during playback
+  void _playAudioTracks() async {
+    for (final audio in audioItems) {
+      if (playheadPosition >= audio.startTime &&
+          playheadPosition < audio.startTime + audio.duration) {
+        final ctrl = _audioControllers[audio.id];
+        if (ctrl != null && ctrl.value.isInitialized) {
+          final localPos = playheadPosition - audio.startTime;
+          final sourcePos = audio.trimStart + localPos;
+
+          if ((ctrl.value.position - sourcePos).abs() > const Duration(milliseconds: 100)) {
+            await ctrl.seekTo(sourcePos);
+          }
+
+          if (isPlaying && !ctrl.value.isPlaying) {
+            await ctrl.play();
+          } else if (!isPlaying && ctrl.value.isPlaying) {
+            await ctrl.pause();
+          }
+        }
+      }
+    }
   }
 
   double _getTotalDuration() {
@@ -519,20 +592,28 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return max;
   }
 
+// 9. IMPROVED: Better getCurrentSpeed for smooth playback
   double getCurrentSpeed(TimelineItem item, Duration localTime) {
     if (item.speedPoints.isEmpty) return item.speed;
-    final progress =
-        localTime.inMilliseconds / item.originalDuration.inMilliseconds;
+
+    final progress = localTime.inMilliseconds /
+        math.max(item.originalDuration.inMilliseconds, 1);
+
     SpeedPoint? prev;
+
     for (final point in item.speedPoints) {
       if (progress <= point.time) {
-        if (prev == null) return point.speed;
-        final t = (progress - prev.time) / (point.time - prev.time);
-        return prev.speed + (point.speed - prev.speed) * t;
+        if (prev == null) return point.speed.clamp(0.25, 2.0);
+
+        final t = (progress - prev.time) / math.max(point.time - prev.time, 0.001);
+        final interpolated = prev.speed + (point.speed - prev.speed) * t;
+
+        return interpolated.clamp(0.25, 2.0);
       }
       prev = point;
     }
-    return item.speedPoints.last.speed;
+
+    return item.speedPoints.last.speed.clamp(0.25, 2.0);
   }
 
   void _updatePreview() {
@@ -543,7 +624,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return (v.clamp(0.0, 1.0) * 100).round();
   }
 
-  void _updatePreviewImmediate() async {
+// 5. FIXED: Real-time preview update with proper sync
+  Future<void> _updatePreviewImmediate() async {
     if (!mounted || !_isPreviewReady) return;
 
     final active = _findActiveVideo();
@@ -552,27 +634,53 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final ctrl = _controllers[active.id]!;
     if (!ctrl.value.isInitialized) return;
 
-    final local = (playheadPosition - active.startTime).clamp(
-      Duration.zero,
-      active.duration,
-    );
-    final speed = getCurrentSpeed(active, local).clamp(0.5, 2.0);
-    final sourceMs =
-        (active.trimStart +
-                Duration(milliseconds: (local.inMilliseconds / speed).round()))
-            .inMilliseconds;
+    try {
+      final local = (playheadPosition - active.startTime)
+          .clamp(Duration.zero, active.duration);
 
-    await ctrl.seekTo(Duration(milliseconds: sourceMs));
-    await ctrl.setPlaybackSpeed(speed);
-    await ctrl.setVolume(active.volume);
+      final currentSpeed = getCurrentSpeed(active, local);
+      final sourcePos = active.trimStart + Duration(
+        milliseconds: (local.inMilliseconds / currentSpeed).round(),
+      );
 
-    if (isPlaying)
-      ctrl.play();
-    else
-      ctrl.pause();
+      // Switch clip if needed
+      if (_activeItem?.id != active.id) {
+        await _switchToClip(active);
+        return;
+      }
 
-    if (_activeItem?.id != active.id) _switchToClip(active);
+      // CRITICAL FIX: Update speed and volume with stabilization delay
+      final targetSpeed = currentSpeed.clamp(0.25, 2.0);
+      final needsSpeedUpdate = (ctrl.value.playbackSpeed - targetSpeed).abs() > 0.05;
+      final needsVolumeUpdate = (ctrl.value.volume - active.volume).abs() > 0.05;
+
+      if (needsSpeedUpdate) {
+        await ctrl.setPlaybackSpeed(targetSpeed);
+        await Future.delayed(const Duration(milliseconds: 20));
+      }
+
+      if (needsVolumeUpdate) {
+        await ctrl.setVolume(active.volume);
+      }
+
+      // Only seek if really needed (reduces crackling)
+      final currentPos = ctrl.value.position;
+      final positionDiff = (sourcePos - currentPos).abs();
+
+      if (positionDiff > const Duration(milliseconds: 150)) {
+        await ctrl.seekTo(sourcePos);
+
+        if (!isPlaying) {
+          await Future.delayed(const Duration(milliseconds: 30));
+        }
+      }
+
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('Preview update error: $e');
+    }
   }
+
 
   TimelineItem? _findActiveVideo() {
     for (final item in clips) {
@@ -1085,7 +1193,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       videoWidget = _buildPlaceholder();
     }
 
-    // Highlight selected video clip
+    // Your original selection highlight
     final selectedClip = getSelectedItem();
     final isVideoSelected =
         selectedClip?.type == TimelineItemType.video && _selection.isEditMode;
@@ -1140,6 +1248,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
     );
   }
+
 
   void _showCropEditor() {
     final item = getSelectedItem();
@@ -1514,11 +1623,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   void _openNavMode(BottomNavMode mode) {
     setState(() => _currentNavMode = mode);
 
-    // Auto-select clip at playhead
     final clip = getClipAtPlayhead();
     if (clip != null) {
       _selection.select(clip.id, clip.type);
       _activeItem = clip;
+
+      // Set editing context
+      _editingContext.activeItemId = clip.id;
+      _editingContext.activeItemType = clip.type;
+
+      _switchToClip(clip);
+      _updatePreview();
     }
   }
 
@@ -1530,9 +1645,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       return;
     }
 
+    // Enter split mode
+    setState(() {
+      _editingContext.activeItemId = item.id;
+      _editingContext.activeItemType = item.type;
+      _editingContext.activeEditMode = 'split';
+    });
+
     final local = playheadPosition - item.startTime;
     if (local <= Duration.zero || local >= item.duration) {
-      _showMessage('Move playhead inside clip');
+      _showMessage('Move playhead inside clip to split');
       return;
     }
 
@@ -1554,20 +1676,42 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       clips.sort((a, b) => a.startTime.compareTo(b.startTime));
       _selection.select(second.id, second.type);
       _activeItem = second;
+
+      // Clear edit mode after operation
+      Future.delayed(const Duration(seconds: 1), () {
+        if (mounted) {
+          setState(() => _editingContext.clear());
+        }
+      });
     });
 
-    _showMessage('Split complete');
+    _updatePreview();
+    _showMessage('✂️ Split complete');
   }
 
   void _smartSpeed() {
     final item = _activeItem ?? _getClipAtPlayhead();
     if (item == null) return;
+
+    setState(() {
+      _editingContext.activeItemId = item.id;
+      _editingContext.activeItemType = item.type;
+      _editingContext.activeEditMode = 'speed';
+    });
+
     _showCompactSpeedEditor(item);
   }
 
   void _smartCrop() {
     final item = _activeItem ?? _getClipAtPlayhead();
     if (item == null || item.type != TimelineItemType.video) return;
+
+    setState(() {
+      _editingContext.activeItemId = item.id;
+      _editingContext.activeItemType = item.type;
+      _editingContext.activeEditMode = 'crop';
+    });
+
     _showCropEditor();
   }
 
@@ -1575,13 +1719,28 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final item = _activeItem ?? _getClipAtPlayhead();
     if (item == null) return;
 
+    // Enter rotate mode
+    setState(() {
+      _editingContext.activeItemId = item.id;
+      _editingContext.activeItemType = item.type;
+      _editingContext.activeEditMode = 'rotate';
+    });
+
     _saveToHistory();
     setState(() {
       item.rotation += 90;
       if (item.rotation >= 360) item.rotation = 0;
     });
+
     _updatePreview();
-    _showMessage('Rotated ${item.rotation}°');
+    _showMessage('🔄 Rotated ${item.rotation}°');
+
+    // Clear after 1 second
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) {
+        setState(() => _editingContext.clear());
+      }
+    });
   }
 
   void _smartVolume() {
@@ -1690,12 +1849,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return Positioned(
       left: startX + centerX,
       child: GestureDetector(
-        onTap: () {
+        onTap: () async {
           setState(() {
             _selection.select(item.id, item.type);
             _activeItem = item;
             playheadPosition = item.startTime;
           });
+
+          // Switch with proper delay to prevent crackling
+          await _switchToClip(item);
+          await Future.delayed(const Duration(milliseconds: 50));
           _updatePreview();
         },
         onHorizontalDragStart: (d) {
@@ -1733,7 +1896,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
             });
             _updatePreview();
           } else if (!_isResizingClip) {
-            // Move whole clip
             final deltaSec = Duration(
               milliseconds: (d.delta.dx / pixelsPerSecond * 1000).round(),
             );
@@ -1755,9 +1917,9 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
             color: Colors.grey[850],
             borderRadius: BorderRadius.circular(8),
             border:
-                isSelected
-                    ? Border.all(color: const Color(0xFF00D9FF), width: 3)
-                    : null,
+            isSelected
+                ? Border.all(color: const Color(0xFF00D9FF), width: 3)
+                : null,
           ),
           child: Stack(
             children: [
@@ -1789,6 +1951,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                   child: Text(
                     _formatTime(item.duration),
                     style: const TextStyle(color: Colors.white, fontSize: 9),
+                    textAlign: TextAlign.center,
                   ),
                 ),
               ),
@@ -1812,7 +1975,9 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
           setState(() {
             _selection.select(item.id, item.type);
             _activeItem = item;
+            playheadPosition = item.startTime;
           });
+          _updatePreview(); // Audio doesn't use video controller, but still update UI
         },
         onHorizontalDragUpdate: (d) {
           final deltaSec = d.delta.dx / pixelsPerSecond;
@@ -2517,6 +2682,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     );
   }
 
+// 12. WRAP your timeline section with GestureDetector:
   Widget _buildTimelineSection() {
     final screenWidth = MediaQuery.of(context).size.width;
     final totalDuration = _getTotalDuration();
@@ -2525,13 +2691,19 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return Container(
       color: const Color(0xFF000000),
       child: GestureDetector(
+        // Add tap to seek
+        onTapDown: _onTimelineTap,
+
+        // Your existing drag handlers
         onHorizontalDragUpdate: (details) {
           final deltaPx = details.delta.dx;
           final deltaSec = deltaPx / pixelsPerSecond;
+
           setState(() {
             playheadPosition += Duration(
               milliseconds: (deltaSec * 1000).round(),
             );
+
             final total = Duration(seconds: _getTotalDuration().toInt());
             playheadPosition = Duration(
               milliseconds: playheadPosition.inMilliseconds.clamp(
@@ -2539,33 +2711,30 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                 total.inMilliseconds,
               ),
             );
-            timelineOffset =
-                playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
+
+            timelineOffset = playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
+
             if (_timelineScrollController.hasClients) {
               _timelineScrollController.jumpTo(timelineOffset);
             }
           });
+
           _updatePreview();
         },
+
         onScaleUpdate: (details) {
           if (details.scale == 1.0) return;
+
           setState(() {
             final oldPps = pixelsPerSecond;
-            pixelsPerSecond = (pixelsPerSecond * details.scale).clamp(
-              50.0,
-              200.0,
-            );
-            final centerSec =
-                timelineOffset / oldPps + screenWidth / 2 / oldPps;
-            timelineOffset =
-                (centerSec - screenWidth / 2 / pixelsPerSecond) *
-                pixelsPerSecond;
-            timelineOffset = timelineOffset.clamp(
-              0.0,
-              _getTotalDuration() * pixelsPerSecond,
-            );
+            pixelsPerSecond = (pixelsPerSecond * details.scale).clamp(50.0, 200.0);
+
+            final centerSec = timelineOffset / oldPps + screenWidth / 2 / oldPps;
+            timelineOffset = (centerSec - screenWidth / 2 / pixelsPerSecond) * pixelsPerSecond;
+            timelineOffset = timelineOffset.clamp(0.0, _getTotalDuration() * pixelsPerSecond);
           });
         },
+
         child: Stack(
           children: [
             SingleChildScrollView(
@@ -2600,6 +2769,41 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
     );
   }
+
+  // 11. ADDITIONAL: Tap timeline to seek
+  void _onTimelineTap(TapDownDetails details) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final centerX = screenWidth / 2;
+    final tapX = details.localPosition.dx;
+
+    // Calculate time from tap position
+    final tapTimeSeconds = (timelineOffset + tapX - centerX) / pixelsPerSecond;
+    final newPosition = Duration(
+      milliseconds: (tapTimeSeconds * 1000).round(),
+    ).clamp(
+      Duration.zero,
+      Duration(seconds: _getTotalDuration().toInt()),
+    );
+
+    setState(() {
+      playheadPosition = newPosition;
+
+      // Update timeline scroll
+      if (_timelineScrollController.hasClients) {
+        final targetOffset = (newPosition.inMilliseconds / 1000 * pixelsPerSecond) - centerX;
+        _timelineScrollController.jumpTo(
+          targetOffset.clamp(
+            0.0,
+            _timelineScrollController.position.maxScrollExtent,
+          ),
+        );
+      }
+    });
+
+    // Update preview
+    _updatePreview();
+  }
+
 
   Widget _buildVideoTrack() {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -2809,13 +3013,15 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return Positioned(
       left: startX + centerX,
       child: GestureDetector(
-        onTap:
-            () => setState(() {
-              selectedClip = int.tryParse(item.id);
-              playheadPosition = item.startTime;
-              timelineOffset =
-                  playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
-            }),
+        onTap: () {
+          setState(() {
+            _selection.select(item.id, item.type);
+            _activeItem = item;
+            selectedClipId = item.id;
+            playheadPosition = item.startTime;
+          });
+          _updatePreview();
+        },
         onHorizontalDragStart: (_) => _saveToHistory(),
         onHorizontalDragUpdate: (d) {
           final deltaSec = d.delta.dx / pixelsPerSecond;
@@ -2978,11 +3184,15 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
           }
         },
         onHorizontalDragEnd: (_) => _isDraggingClip = false,
-        onTap:
-            () => setState(() {
-              selectedClip = int.tryParse(item.id);
-              // DO NOT change playheadPosition or timelineOffset
-            }),
+        onTap: () {
+          setState(() {
+            _selection.select(item.id, item.type);
+            _activeItem = item;
+            selectedClipId = item.id; // if you're still using this field
+            playheadPosition = item.startTime;
+          });
+          _updatePreview(); // Ensures overlay/text becomes interactive
+        },
         onLongPress: () {
           setState(() => selectedClip = int.tryParse(item.id));
           _showResizeDialog(item);
@@ -3181,21 +3391,22 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     _showMessage('Deleted');
   }
 
+// 8. FIXED: Add video with immediate preview
   Future<void> _addVideo() async {
     final XFile? file = await _picker.pickVideo(source: ImageSource.gallery);
     if (file == null) return;
 
     _showLoading();
+
     try {
       final videoPath = file.path;
       final controller = VideoPlayerController.file(File(videoPath));
-      await controller.initialize();
-      await controller.seekTo(const Duration(milliseconds: 100));
-      await controller.play();
-      await Future.delayed(const Duration(milliseconds: 50));
-      await controller.pause();
 
-      // Optional: seek back to start if you want to show the very first frame
+      await controller.initialize();
+
+      // Simple frame display
+      await controller.seekTo(const Duration(milliseconds: 50));
+      await Future.delayed(const Duration(milliseconds: 100));
       await controller.seekTo(Duration.zero);
 
       final duration = controller.value.duration;
@@ -3204,21 +3415,21 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         videoPath,
         duration,
       );
+
       if (bytesList.isEmpty) {
         bytesList = await _generateFallbackThumbnails(videoPath, duration);
       }
+
       if (bytesList.isEmpty) {
         _hideLoading();
         _showError('Could not generate thumbnails');
+        controller.dispose();
         return;
       }
 
-      final startTime =
-          clips.isEmpty
-              ? Duration.zero
-              : clips
-                  .map((i) => i.startTime + i.duration)
-                  .reduce((a, b) => a > b ? a : b);
+      final startTime = clips.isEmpty
+          ? Duration.zero
+          : clips.map((i) => i.startTime + i.duration).reduce((a, b) => a > b ? a : b);
 
       final item = TimelineItem(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -3230,11 +3441,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         trimStart: Duration.zero,
         trimEnd: duration,
         thumbnailBytes: bytesList,
-        thumbnailPaths: [],
-        cropX: 0.0,
-        cropY: 0.0,
-        cropWidth: 1.0,
-        cropHeight: 1.0,
       );
 
       _controllers[item.id] = controller;
@@ -3243,17 +3449,33 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       setState(() {
         clips.add(item);
         clips.sort((a, b) => a.startTime.compareTo(b.startTime));
-        selectedClip = int.parse(item.id);
         _activeItem = item;
         _activeVideoController = controller;
         playheadPosition = startTime;
-        timelineOffset =
-            playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
       });
 
-      _updatePreview();
+      // Initialize settings
+      await controller.setVolume(item.volume);
+      await controller.setPlaybackSpeed(item.speed.clamp(0.25, 2.0));
+
+      if (_timelineScrollController.hasClients) {
+        final targetOffset =
+            (startTime.inMilliseconds / 1000 * pixelsPerSecond) -
+                (MediaQuery.of(context).size.width / 2);
+
+        _timelineScrollController.animateTo(
+          targetOffset.clamp(
+            0.0,
+            _timelineScrollController.position.maxScrollExtent,
+          ),
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+
       _hideLoading();
-      _showMessage('Video added: ${file.name}');
+      _showMessage('Video added successfully');
+
     } catch (e) {
       debugPrint('Error adding video: $e');
       _hideLoading();
@@ -3292,8 +3514,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       );
 
       _audioControllers[item.id] = ctrl;
-      ctrl.setLooping(false);
-      ctrl.setVolume(0);
+
+      // Set up audio controller
+      await ctrl.setVolume(item.volume);
+      await ctrl.setPlaybackSpeed(1.0);
 
       _saveToHistory();
       setState(() {

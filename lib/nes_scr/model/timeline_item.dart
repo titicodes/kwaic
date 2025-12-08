@@ -35,6 +35,15 @@ enum BottomNavMode {
   effects,
   filters,
   animation,
+
+}
+
+// Add this new enum for timeline modes
+enum TimelineDisplayMode {
+  allTracks,    // Show all tracks (normal)
+  videoTextOnly, // Video + Text tracks only
+  videoAudioOnly, // Video + Audio tracks only
+  videoOverlayOnly, // Video + Overlay tracks only
 }
 
 class TimelineItem {

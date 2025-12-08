@@ -11,6 +11,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/gestures.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:kwaic/nes_scr/screen/video_editor_helpers.dart';
 import 'package:video_player/video_player.dart';
 import 'package:path_provider/path_provider.dart';
@@ -83,14 +84,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   Timer? playbackTimer;
   final ImagePicker _picker = ImagePicker();
-  final Map<String, VideoPlayerController> _audioControllers = {};
+  final Map<String, AudioPlayer> _audioPlayers = {};
 
   String? selectedEffect;
   String? selectedFilter;
   double filterIntensity = 1.0;
   int _nextLayerIndex = 0;
 
-  VideoPlayerController? _activeAudioController;
   bool _isInitializing = false;
 
   String exportResolution = '1080p';
@@ -158,64 +158,45 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   bool _isPreviewReady = false;
   late AudioVideoSync _audioSync;
   final EditingContext _editingContext = EditingContext();
-
+  ValueNotifier<Duration> playheadNotifier = ValueNotifier(Duration.zero);
+  TimelineDisplayMode _timelineDisplayMode = TimelineDisplayMode.allTracks;
+  bool _showBackButton = false;
 
   @override
   void initState() {
     super.initState();
-
-    currentProjectId =
-        widget.projectId ?? DateTime.now().millisecondsSinceEpoch.toString();
+    currentProjectId = widget.projectId ?? DateTime.now().millisecondsSinceEpoch.toString();
     currentProjectName = widget.projectName ?? 'Untitled Project';
     historyManager = HistoryManager();
-
-    _previewDebouncer = Debouncer(milliseconds: 50);
-    _audioSync = AudioVideoSync(_audioControllers, audioItems);
-
-    // Dummy controller
-    _activeVideoController = VideoPlayerController.file(File(''))
-      ..initialize().then((_) => setState(() {}));
-
+    _previewDebouncer = Debouncer(milliseconds: 100);
     autosaveManager = AutosaveManager(
       onAutosave: _performAutosave,
       autosaveInterval: const Duration(minutes: 2),
     );
     autosaveManager.start();
 
-    _playbackTicker = createTicker(_playbackFrame);
-
-    thumbnailNotifier.addListener(() => mounted ? setState(() {}) : null);
-
+    playheadNotifier.addListener(() => setState(() {}));
     _timelineScrollController.addListener(() {
       setState(() => timelineOffset = _timelineScrollController.offset);
     });
 
     if (widget.initialVideos != null && widget.initialVideos!.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => _processInitialVideos(),
-      );
+      WidgetsBinding.instance.addPostFrameCallback((_) => _processInitialVideos());
     }
-
-    _toolPanelController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 350),
-    );
-    _toolPanelHeight = Tween<double>(begin: 0.0, end: 0.55).animate(
-      CurvedAnimation(parent: _toolPanelController, curve: Curves.easeOutCubic),
-    );
-
-    _draggableController.addListener(() {
-      if (_draggableController.pixels < 100 &&
-          _toolPanelController.isAnimating == false) {
-        closeToolPanel();
-      }
-    });
   }
+
+  // Reliable way to know if video has a visible frame
+  bool get _isVideoFrameReady {
+    final ctrl = _activeVideoController;
+    if (ctrl == null || !ctrl.value.isInitialized) return false;
+    return ctrl.value.position > Duration.zero;
+  }
+
 
   TimelineItem? getClipAtPlayhead() {
     for (final clip in clips) {
-      if (playheadPosition >= clip.startTime &&
-          playheadPosition < clip.startTime + clip.duration) {
+      if (playheadNotifier.value >= clip.startTime &&
+          playheadNotifier.value < clip.startTime + clip.duration) {
         return clip;
       }
     }
@@ -229,16 +210,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     try {
       Duration currentStart = Duration.zero;
-
       for (var video in widget.initialVideos!) {
         final path = video.path;
         final controller = VideoPlayerController.file(File(path));
-
         await controller.initialize();
 
-        // Simple frame display - just seek and wait
-        await controller.seekTo(const Duration(milliseconds: 50));
-        await Future.delayed(const Duration(milliseconds: 100));
+        // Force first frame to avoid black screen
+        await controller.seekTo(const Duration(milliseconds: 100));
+        await Future.delayed(const Duration(milliseconds: 250));
         await controller.seekTo(Duration.zero);
 
         final duration = controller.value.duration;
@@ -266,7 +245,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         final first = clips.first;
         _activeItem = first;
         _activeVideoController = _controllers[first.id];
-        _switchToClip(first);
+        await _switchToClip(first);
         setState(() => _isPreviewReady = true);
       }
     } catch (e) {
@@ -281,114 +260,81 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final ctrl = _controllers[item.id];
     if (ctrl == null || !ctrl.value.isInitialized) return;
 
+    _activeVideoController?.removeListener(_updateFromController);
     _activeVideoController = ctrl;
     _activeItem = item;
 
-    final local = (playheadPosition - item.startTime).clamp(Duration.zero, item.duration);
-    final sourcePos = item.trimStart + Duration(
-      milliseconds: (local.inMilliseconds / item.speed).round(),
-    );
-
-    // CRITICAL FIX: Set volume and speed BEFORE any seeking
+    final local = (playheadNotifier.value - item.startTime).clamp(Duration.zero, item.duration);
+    final sourcePos = item.trimStart + Duration(milliseconds: (local.inMilliseconds / item.speed).round());
     final targetSpeed = getCurrentSpeed(item, local).clamp(0.25, 2.0);
 
     try {
       await ctrl.setVolume(item.volume);
       await ctrl.setPlaybackSpeed(targetSpeed);
-      await Future.delayed(const Duration(milliseconds: 20)); // Let it stabilize
+      await Future.delayed(const Duration(milliseconds: 80));
 
+      // Force frame to appear — kills black screen
+      if (sourcePos > const Duration(seconds: 1)) {
+        await ctrl.seekTo(sourcePos - const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
       await ctrl.seekTo(sourcePos);
 
       if (isPlaying) {
+        int attempts = 0;
+        while (attempts < 30 && !_isVideoFrameReady) {
+          await Future.delayed(const Duration(milliseconds: 50));
+          attempts++;
+        }
         await ctrl.play();
-      } else {
-        await Future.delayed(const Duration(milliseconds: 30));
+        ctrl.addListener(_updateFromController);
       }
     } catch (e) {
       debugPrint('Switch error: $e');
     }
-
     if (mounted) setState(() {});
   }
 
-  Future<List<Uint8List>> _generateRobustThumbnails(
+  Future<List<Uint8List>> _generateRobustThumbnails(String videoPath, Duration duration) async {
+    final thumbnails = <Uint8List>[];
+    final tempDir = await getTemporaryDirectory();
+    final outputDir = Directory('${tempDir.path}/thumbs_${DateTime.now().millisecondsSinceEpoch}');
+    await outputDir.create(recursive: true);
+
+    final futures = <Future>[];
+    const count = 8;
+
+    for (int i = 0; i < count; i++) {
+      final progress = i / (count - 1);
+      final timeSec = (duration.inSeconds * progress).clamp(0.5, duration.inSeconds - 0.5);
+      final outputPath = '${outputDir.path}/thumb_$i.jpg';
+      final command = '-ss $timeSec -i "$videoPath" -vframes 1 -vf "scale=120:120:force_original_aspect_ratio=decrease,pad=120:120:(ow-iw)/2:(oh-ih)/2" -q:v 5 -y "$outputPath"';
+
+      futures.add(FFmpegKit.execute(command).then((session) async {
+        if (ReturnCode.isSuccess(await session.getReturnCode())) {
+          final file = File(outputPath);
+          if (await file.exists()) {
+            final bytes = await file.readAsBytes();
+            if (bytes.length > 1000) thumbnails.add(bytes);
+          }
+        }
+      }));
+    }
+
+    await Future.wait(futures);
+    await outputDir.delete(recursive: true);
+    return thumbnails;
+  }
+
+
+  Future<List<Uint8List>> _generateFallbackThumbnails(
       String videoPath,
       Duration duration,
       )
   async {
-    final thumbnails = <Uint8List>[];
-    final tempDir = await getTemporaryDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final outputDir = Directory('${tempDir.path}/thumbs_$timestamp');
-
-    if (!await outputDir.exists()) {
-      await outputDir.create(recursive: true);
-    }
-
-    try {
-      final durationSecs = duration.inSeconds.toDouble();
-      final count = 12; // Generate 12 thumbnails for smooth scrubbing
-
-      // Generate thumbnails at specific intervals
-      for (int i = 0; i < count; i++) {
-        // Skip first and last 0.5 seconds to avoid black frames
-        final progress = i / (count - 1);
-        final timeSec = (durationSecs * progress).clamp(
-          0.5,
-          durationSecs - 0.5,
-        );
-        final outputPath = '${outputDir.path}/thumb_$i.jpg';
-
-        // FFmpeg command optimized for thumbnail extraction
-        final command =
-            '-ss $timeSec -i "$videoPath" '
-            '-vframes 1 '
-            '-vf "scale=120:120:force_original_aspect_ratio=decrease,'
-            'pad=120:120:(ow-iw)/2:(oh-ih)/2" '
-            '-q:v 5 '
-            '-y "$outputPath"';
-
-        final session = await FFmpegKit.execute(command);
-        final returnCode = await session.getReturnCode();
-
-        if (ReturnCode.isSuccess(returnCode)) {
-          final file = File(outputPath);
-          if (await file.exists()) {
-            final bytes = await file.readAsBytes();
-            if (bytes.length > 1000) {
-              thumbnails.add(bytes);
-              debugPrint(
-                '✅ Generated thumbnail $i at ${timeSec.toStringAsFixed(1)}s',
-              );
-            }
-          }
-        }
-
-        // Add small delay to avoid overloading
-        await Future.delayed(const Duration(milliseconds: 50));
-      }
-
-      // Cleanup
-      await outputDir.delete(recursive: true);
-
-      debugPrint('🎯 Generated ${thumbnails.length} thumbnails successfully');
-      return thumbnails;
-    } catch (e) {
-      debugPrint('❌ Thumbnail generation error: $e');
-      await outputDir.delete(recursive: true);
-      return thumbnails;
-    }
-  }
-
-  Future<List<Uint8List>> _generateFallbackThumbnails(
-    String videoPath,
-    Duration duration,
-  )
-  async {
     final List<Uint8List> thumbs = [];
     final ms = duration.inMilliseconds;
     final count = (duration.inSeconds / 2).clamp(8.0, 25.0).toInt();
-
     for (int i = 0; i < count; i++) {
       final timeMs = ((ms * i) / (count - 1)).round().clamp(1000, ms - 1000);
       final bytes = await VideoThumbnail.thumbnailData(
@@ -403,10 +349,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return thumbs;
   }
 
+
 // 7. FIXED: Toggle play/pause with proper state management
   void togglePlayPause() async {
-    if (_activeVideoController == null ||
-        !_activeVideoController!.value.isInitialized) {
+    if (_activeVideoController == null || !_activeVideoController!.value.isInitialized) {
       _showMessage('No video loaded');
       return;
     }
@@ -414,58 +360,74 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     setState(() => isPlaying = !isPlaying);
 
     if (isPlaying) {
-      _lastFrameTime = DateTime.now().millisecondsSinceEpoch;
-
-      // Ensure correct position and settings BEFORE playing
       await _updatePreviewImmediate();
-      await Future.delayed(const Duration(milliseconds: 30));
+
+      int attempts = 0;
+      while (attempts < 30 && !_isVideoFrameReady) {
+        await Future.delayed(const Duration(milliseconds: 50));
+        attempts++;
+      }
 
       await _activeVideoController!.play();
-
-      if (!_playbackTicker.isActive) {
-        _playbackTicker.start();
-      }
+      _activeVideoController!.addListener(_updateFromController);
     } else {
-      _playbackTicker.stop();
+      _activeVideoController!.removeListener(_updateFromController);
       await _activeVideoController!.pause();
-      await Future.delayed(const Duration(milliseconds: 30));
       await _updatePreviewImmediate();
     }
+  }
+
+  void _updateFromController() {
+    if (!mounted || !isPlaying || _activeVideoController == null) return;
+
+    final ctrl = _activeVideoController!;
+    final localPos = ctrl.value.position - _activeItem!.trimStart;
+    final speed = getCurrentSpeed(_activeItem!, localPos);
+    final globalPos = _activeItem!.startTime + Duration(milliseconds: (localPos.inMilliseconds * speed).round());
+
+    playheadNotifier.value = globalPos.clamp(Duration.zero, Duration(seconds: _getTotalDuration().toInt()));
+
+    final targetOffset = (playheadNotifier.value.inMilliseconds / 1000 * pixelsPerSecond) -
+        (MediaQuery.of(context).size.width / 2);
+
+    if (_timelineScrollController.hasClients) {
+      _timelineScrollController.jumpTo(
+        targetOffset.clamp(0.0, _timelineScrollController.position.maxScrollExtent),
+      );
+    }
+
+    _playAudioTracks();
   }
 
   @override
   void dispose() {
     isPlaying = false;
-    _playbackTicker.stop();
-    _playbackTicker.dispose();
+    _activeVideoController?.removeListener(_updateFromController);
 
-    for (final controller in _controllers.values) {
-      try {
-        controller.dispose();
-      } catch (e) {
-        debugPrint('Controller disposal error: $e');
-      }
+    // Dispose all video controllers
+    for (final c in _controllers.values) {
+      c.pause();
+      c.dispose();
     }
+
+    // Dispose all audio players
+    for (final player in _audioPlayers.values) {
+      player.pause();
+      player.dispose();
+    }
+
+    _audioPlayers.clear();
     _controllers.clear();
 
-    for (final controller in _audioControllers.values) {
-      try {
-        controller.dispose();
-      } catch (e) {
-        debugPrint('Audio controller disposal error: $e');
-      }
-    }
-    _audioControllers.clear();
-
-    thumbnailNotifier.dispose();
+    // Dispose other resources
     _timelineScrollController.dispose();
-    _toolPanelController.dispose();
-    _draggableController.dispose();
     _previewDebouncer.dispose();
     autosaveManager.stop();
+    playheadNotifier.dispose();
 
     super.dispose();
   }
+
 
   void _saveToHistory() {
     final state = EditorState(
@@ -491,7 +453,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         textItems = state.textItems.map((t) => t.copyWith()).toList();
         overlayItems = state.overlayItems.map((o) => o.copyWith()).toList();
         selectedClip = state.selectedClip;
-        playheadPosition = state.playheadPosition;
+        playheadNotifier.value = state.playheadPosition;
       });
       _updatePreview();
     }
@@ -506,75 +468,34 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         textItems = state.textItems.map((t) => t.copyWith()).toList();
         overlayItems = state.overlayItems.map((o) => o.copyWith()).toList();
         selectedClip = state.selectedClip;
-        playheadPosition = state.playheadPosition;
+        playheadNotifier.value = state.playheadPosition;
       });
       _updatePreview();
     }
   }
 
-// 6. FIXED: Smooth playback frame update
-  void _playbackFrame(Duration elapsed) {
-    if (!mounted || !isPlaying) return;
-
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final deltaMs = now - _lastFrameTime;
-    _lastFrameTime = now;
-
-    if (deltaMs <= 0 || deltaMs > 100) return;
-
-    setState(() {
-      playheadPosition += Duration(milliseconds: deltaMs);
-
-      final maxDuration = Duration(
-        milliseconds: (_getTotalDuration() * 1000).toInt(),
-      );
-
-      if (playheadPosition >= maxDuration) {
-        playheadPosition = maxDuration;
-        isPlaying = false;
-        _playbackTicker.stop();
-        _activeVideoController?.pause();
-        return;
-      }
-
-      final targetOffset =
-          (playheadPosition.inMilliseconds / 1000 * pixelsPerSecond) -
-              (MediaQuery.of(context).size.width / 2);
-
-      if (_timelineScrollController.hasClients) {
-        _timelineScrollController.jumpTo(
-          targetOffset.clamp(
-            0.0,
-            _timelineScrollController.position.maxScrollExtent,
-          ),
-        );
-      }
-    });
-
-    _updatePreview();
-    _playAudioTracks();
-  }
 
 // Play audio tracks during playback
   void _playAudioTracks() async {
     for (final audio in audioItems) {
-      if (playheadPosition >= audio.startTime &&
-          playheadPosition < audio.startTime + audio.duration) {
-        final ctrl = _audioControllers[audio.id];
-        if (ctrl != null && ctrl.value.isInitialized) {
-          final localPos = playheadPosition - audio.startTime;
-          final sourcePos = audio.trimStart + localPos;
+      final player = _audioPlayers[audio.id];
+      if (player == null) continue;
 
-          if ((ctrl.value.position - sourcePos).abs() > const Duration(milliseconds: 100)) {
-            await ctrl.seekTo(sourcePos);
-          }
+      final inRange = playheadNotifier.value >= audio.startTime &&
+          playheadNotifier.value < audio.startTime + audio.duration;
 
-          if (isPlaying && !ctrl.value.isPlaying) {
-            await ctrl.play();
-          } else if (!isPlaying && ctrl.value.isPlaying) {
-            await ctrl.pause();
-          }
+      if (inRange) {
+        final targetPos = audio.trimStart + (playheadNotifier.value - audio.startTime);
+        if ((player.position - targetPos).abs() > const Duration(milliseconds: 100)) {
+          await player.seek(targetPos);
         }
+        if (isPlaying) {
+          await player.play();
+        } else {
+          await player.pause();
+        }
+      } else {
+        await player.pause();
       }
     }
   }
@@ -583,9 +504,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     double max = 0;
     for (var list in [clips, audioItems, overlayItems, textItems]) {
       if (list.isNotEmpty) {
-        final end = list
-            .map((e) => (e.startTime + e.duration).inSeconds.toDouble())
-            .reduce(math.max);
+        final end = list.map((e) => (e.startTime + e.duration).inSeconds.toDouble()).reduce(math.max);
         if (end > max) max = end;
       }
     }
@@ -595,24 +514,16 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 // 9. IMPROVED: Better getCurrentSpeed for smooth playback
   double getCurrentSpeed(TimelineItem item, Duration localTime) {
     if (item.speedPoints.isEmpty) return item.speed;
-
-    final progress = localTime.inMilliseconds /
-        math.max(item.originalDuration.inMilliseconds, 1);
-
+    final progress = localTime.inMilliseconds / item.originalDuration.inMilliseconds;
     SpeedPoint? prev;
-
     for (final point in item.speedPoints) {
       if (progress <= point.time) {
         if (prev == null) return point.speed.clamp(0.25, 2.0);
-
-        final t = (progress - prev.time) / math.max(point.time - prev.time, 0.001);
-        final interpolated = prev.speed + (point.speed - prev.speed) * t;
-
-        return interpolated.clamp(0.25, 2.0);
+        final t = (progress - prev.time) / (point.time - prev.time);
+        return (prev.speed + (point.speed - prev.speed) * t).clamp(0.25, 2.0);
       }
       prev = point;
     }
-
     return item.speedPoints.last.speed.clamp(0.25, 2.0);
   }
 
@@ -627,68 +538,40 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 // 5. FIXED: Real-time preview update with proper sync
   Future<void> _updatePreviewImmediate() async {
     if (!mounted || !_isPreviewReady) return;
-
     final active = _findActiveVideo();
     if (active == null || !_controllers.containsKey(active.id)) return;
 
     final ctrl = _controllers[active.id]!;
     if (!ctrl.value.isInitialized) return;
 
-    try {
-      final local = (playheadPosition - active.startTime)
-          .clamp(Duration.zero, active.duration);
+    final local = (playheadNotifier.value - active.startTime).clamp(Duration.zero, active.duration);
+    final currentSpeed = getCurrentSpeed(active, local);
+    final sourcePos = active.trimStart + Duration(milliseconds: (local.inMilliseconds / currentSpeed).round());
 
-      final currentSpeed = getCurrentSpeed(active, local);
-      final sourcePos = active.trimStart + Duration(
-        milliseconds: (local.inMilliseconds / currentSpeed).round(),
-      );
-
-      // Switch clip if needed
-      if (_activeItem?.id != active.id) {
-        await _switchToClip(active);
-        return;
-      }
-
-      // CRITICAL FIX: Update speed and volume with stabilization delay
-      final targetSpeed = currentSpeed.clamp(0.25, 2.0);
-      final needsSpeedUpdate = (ctrl.value.playbackSpeed - targetSpeed).abs() > 0.05;
-      final needsVolumeUpdate = (ctrl.value.volume - active.volume).abs() > 0.05;
-
-      if (needsSpeedUpdate) {
-        await ctrl.setPlaybackSpeed(targetSpeed);
-        await Future.delayed(const Duration(milliseconds: 20));
-      }
-
-      if (needsVolumeUpdate) {
-        await ctrl.setVolume(active.volume);
-      }
-
-      // Only seek if really needed (reduces crackling)
-      final currentPos = ctrl.value.position;
-      final positionDiff = (sourcePos - currentPos).abs();
-
-      if (positionDiff > const Duration(milliseconds: 150)) {
-        await ctrl.seekTo(sourcePos);
-
-        if (!isPlaying) {
-          await Future.delayed(const Duration(milliseconds: 30));
-        }
-      }
-
-      if (mounted) setState(() {});
-    } catch (e) {
-      debugPrint('Preview update error: $e');
+    if (_activeItem?.id != active.id) {
+      await _switchToClip(active);
+      return;
     }
-  }
 
+    final targetSpeed = currentSpeed.clamp(0.25, 2.0);
+    if ((ctrl.value.playbackSpeed - targetSpeed).abs() > 0.05) {
+      await ctrl.setPlaybackSpeed(targetSpeed);
+      await Future.delayed(const Duration(milliseconds: 60));
+    }
+
+    final diff = (sourcePos - ctrl.value.position).abs();
+    if (diff > const Duration(milliseconds: 300)) {
+      await ctrl.seekTo(sourcePos);
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+
+    if (mounted) setState(() {});
+  }
 
   TimelineItem? _findActiveVideo() {
     for (final item in clips) {
-      final effectiveDur = Duration(
-        milliseconds: (item.duration.inMilliseconds / item.speed).round(),
-      );
-      if (playheadPosition >= item.startTime &&
-          playheadPosition < item.startTime + effectiveDur) {
+      final effectiveDur = Duration(milliseconds: (item.duration.inMilliseconds / item.speed).round());
+      if (playheadNotifier.value >= item.startTime && playheadNotifier.value < item.startTime + effectiveDur) {
         return item;
       }
     }
@@ -814,7 +697,9 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
             _buildTopBar(),
             Expanded(child: _buildPreview()),
             _buildPlaybackControls(),
-            SizedBox(height: 240, child: _buildTimelineSection()),
+             _buildTimelineSection(),
+
+            // Show context tools when in specific mode
             if (_currentNavMode != BottomNavMode.normal)
               Container(
                 height: 70,
@@ -822,79 +707,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: Row(
-                    children:
-                        _getContextTools(), // Now it's correct: Row expects List<Widget>
+                    children: _getContextTools(),
                   ),
                 ),
               ),
-            Container(
-              height: 80,
-              color: Colors.black,
-              child: Row(
-                children: [
-                  IconButton(
-                    icon: Icon(
-                      _currentNavMode == BottomNavMode.normal
-                          ? Icons.keyboard_arrow_up
-                          : Icons.keyboard_arrow_down,
-                    ),
-                    onPressed:
-                        () => setState(
-                          () => _currentNavMode = BottomNavMode.normal,
-                        ),
-                  ),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          _navButton(
-                            Icons.edit,
-                            'Edit',
-                            () => _openNavMode(BottomNavMode.edit),
-                          ),
-                          _navButton(
-                            Icons.audiotrack,
-                            'Audio',
-                            () => _openNavMode(BottomNavMode.audio),
-                          ),
-                          _navButton(
-                            Icons.text_fields,
-                            'Text',
-                            () => _openNavMode(BottomNavMode.text),
-                          ),
-                          _navButton(
-                            Icons.emoji_emotions,
-                            'Stickers',
-                            () => _openNavMode(BottomNavMode.stickers),
-                          ),
-                          _navButton(
-                            Icons.layers,
-                            'Overlay',
-                            () => _openNavMode(BottomNavMode.overlay),
-                          ),
-                          _navButton(
-                            Icons.auto_awesome,
-                            'Effects',
-                            () => _openNavMode(BottomNavMode.effects),
-                          ),
-                          _navButton(
-                            Icons.filter,
-                            'Filters',
-                            () => _openNavMode(BottomNavMode.filters),
-                          ),
-                          _navButton(
-                            Icons.animation,
-                            'Animation',
-                            () => _openNavMode(BottomNavMode.animation),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+
+            // Bottom navigation with back button
+            _buildBottomNavWithBackButton(),
           ],
         ),
       ),
@@ -1174,39 +993,29 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   Widget _buildPreview() {
-    final screenSize = MediaQuery.of(context).size;
-
     Widget videoWidget;
+
     if (_activeVideoController != null &&
-        _activeVideoController!.value.isInitialized) {
-      videoWidget = AspectRatio(
-        aspectRatio: _activeVideoController!.value.aspectRatio ?? 16 / 9,
-        child: VideoPlayer(_activeVideoController!),
-      );
-    } else if (_activeItem?.thumbnailBytes != null &&
-        _activeItem!.thumbnailBytes!.isNotEmpty) {
+        _activeVideoController!.value.isInitialized &&
+        _isVideoFrameReady) {
+      videoWidget = VideoPlayer(_activeVideoController!);
+    } else if (_activeItem?.thumbnailBytes?.isNotEmpty == true) {
       videoWidget = Image.memory(
         _activeItem!.thumbnailBytes!.first,
         fit: BoxFit.contain,
       );
     } else {
-      videoWidget = _buildPlaceholder();
-    }
-
-    // Your original selection highlight
-    final selectedClip = getSelectedItem();
-    final isVideoSelected =
-        selectedClip?.type == TimelineItemType.video && _selection.isEditMode;
-
-    if (isVideoSelected) {
       videoWidget = Container(
-        decoration: BoxDecoration(
-          border: Border.all(color: const Color(0xFF00D9FF), width: 4),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: videoWidget,
+        color: Colors.black,
+        child: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.video_file, size: 64, color: Colors.white38),
+              SizedBox(height: 16),
+              Text('Add video to start', style: TextStyle(color: Colors.white38)),
+            ],
+          ),
         ),
       );
     }
@@ -1216,39 +1025,20 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Center(child: videoWidget),
-          ..._buildInteractiveOverlays(screenSize, [
-            ...textItems,
-            ...overlayItems,
-          ]),
-          if (_selection.isEditMode && selectedClip != null)
-            Positioned(
-              top: 16,
-              left: 16,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Text(
-                  'Edit Mode',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
+          // Video layer at bottom
+          Center(
+            child: AspectRatio(
+              aspectRatio: _activeVideoController?.value.aspectRatio ?? 16 / 9,
+              child: videoWidget,
             ),
+          ),
+
+          // Interactive overlays layer - text/images can be positioned ANYWHERE
+          ..._buildInteractiveOverlays(MediaQuery.of(context).size),
         ],
       ),
     );
   }
-
 
   void _showCropEditor() {
     final item = getSelectedItem();
@@ -1621,17 +1411,35 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   void _openNavMode(BottomNavMode mode) {
-    setState(() => _currentNavMode = mode);
+    setState(() {
+      _currentNavMode = mode;
+
+      // Switch timeline display mode based on bottom nav selection
+      switch (mode) {
+        case BottomNavMode.text:
+          _timelineDisplayMode = TimelineDisplayMode.videoTextOnly;
+          _showBackButton = true;
+          break;
+        case BottomNavMode.audio:
+          _timelineDisplayMode = TimelineDisplayMode.videoAudioOnly;
+          _showBackButton = true;
+          break;
+        case BottomNavMode.overlay:
+          _timelineDisplayMode = TimelineDisplayMode.videoOverlayOnly;
+          _showBackButton = true;
+          break;
+        default:
+          _timelineDisplayMode = TimelineDisplayMode.allTracks;
+          _showBackButton = false;
+      }
+    });
 
     final clip = getClipAtPlayhead();
     if (clip != null) {
       _selection.select(clip.id, clip.type);
       _activeItem = clip;
-
-      // Set editing context
       _editingContext.activeItemId = clip.id;
       _editingContext.activeItemType = clip.type;
-
       _switchToClip(clip);
       _updatePreview();
     }
@@ -2147,8 +1955,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     );
   }
 
-  void _showCompactVolumeEditor(TimelineItem item) {
+  Future<void> _showCompactVolumeEditor(TimelineItem item) async {
     double tempVolume = item.volume;
+    // When applying volume
+    final player = _audioPlayers[item.id];
+    if (player != null) {
+      await player.setVolume(tempVolume);
+    }
+    item.volume = tempVolume; // still save for export
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1A1A1A),
@@ -2234,154 +2048,195 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     );
   }
 
-  List<Widget> _buildInteractiveOverlays(
-    Size screenSize,
-    List<TimelineItem> visualItems,
-  ) {
-    final List<Widget> list = [];
-    for (final item in visualItems) {
-      if (playheadPosition >= item.startTime &&
-          playheadPosition < item.startTime + item.duration) {
-        double currX =
-            item.x ?? (item.type == TimelineItemType.text ? 100 : 50);
-        double currY =
-            item.y ?? (item.type == TimelineItemType.text ? 200 : 100);
-        double currScale = item.scale;
-        double currRotation = item.rotation;
+  Widget _buildDraggableOverlayItem(TimelineItem item, Size screenSize) {
+    final isSelected = selectedClipId == item.id;
 
-        Widget child;
-        if (item.type == TimelineItemType.text) {
-          child = Text(
-            item.text ?? '',
-            style: TextStyle(
-              color: item.textColor ?? Colors.white,
-              fontSize: item.fontSize ?? 32,
-              fontWeight: FontWeight.bold,
-              shadows: [
-                Shadow(
-                  offset: const Offset(1, 1),
-                  blurRadius: 3,
-                  color: Colors.black.withOpacity(0.5),
+    // Default values if null
+    double currX = item.x ?? 100;
+    double currY = item.y ?? 200;
+    double currScale = item.scale;
+    double currRotation = item.rotation;
+
+    Widget content;
+    if (item.type == TimelineItemType.text) {
+      content = Text(
+        item.text ?? 'Enter text',
+        style: TextStyle(
+          color: item.textColor ?? Colors.white,
+          fontSize: (item.fontSize ?? 32) * currScale,
+          fontWeight: FontWeight.bold,
+          shadows: [
+            Shadow(
+              offset: const Offset(2, 2),
+              blurRadius: 4,
+              color: Colors.black.withOpacity(0.8),
+            ),
+          ],
+        ),
+        textAlign: TextAlign.center,
+      );
+    } else {
+      content = Image.file(
+        item.file!,
+        width: 200 * currScale,
+        height: 200 * currScale,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => Icon(Icons.image, size: 100 * currScale, color: Colors.white54),
+      );
+    }
+
+    content = Transform.rotate(
+      angle: currRotation * math.pi / 180,
+      child: content,
+    );
+
+    return Positioned(
+      left: currX,
+      top: currY,
+      child: GestureDetector(
+        // Single tap → select
+        onTap: () {
+          setState(() {
+            selectedClipId = item.id;
+            _selection.select(item.id, item.type);
+            _activeItem = item;
+          });
+          if (item.type == TimelineItemType.text) {
+            _showTextBottomSheet(item);
+          }
+        },
+
+        // This replaces onPanUpdate + onScaleStart/Update
+        onScaleStart: (details) {
+          _saveToHistory();
+          // Store initial values for relative movement
+          _initialScale = item.scale;
+          _initialRotation = item.rotation;
+        },
+
+        onScaleUpdate: (details) {
+          setState(() {
+            // 1. Drag (single finger pan)
+            if (details.pointerCount == 1) {
+              item.x = (item.x ?? currX) + details.focalPointDelta.dx;
+              item.y = (item.y ?? currY) + details.focalPointDelta.dy;
+
+              // Optional: keep inside bounds
+              final maxX = screenSize.width - 100;
+              final maxY = screenSize.height - 100;
+              item.x = item.x!.clamp(0.0, maxX);
+              item.y = item.y!.clamp(0.0, maxY);
+            }
+
+            // 2. Pinch to scale
+            if (details.scale != 1.0) {
+              item.scale = (_initialScale * details.scale).clamp(0.3, 4.0);
+            }
+
+            // 3. Two-finger rotation
+            if (details.rotation != 0.0) {
+              item.rotation = _initialRotation + (details.rotation * 180 / math.pi);
+              item.rotation %= 360;
+            }
+          });
+        },
+
+        child: Container(
+          decoration: isSelected
+              ? BoxDecoration(
+            border: Border.all(color: const Color(0xFF00D9FF), width: 2),
+          )
+              : null,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              content,
+              if (isSelected) ...[
+                // Resize handle (bottom-right)
+                Positioned(
+                  right: -10,
+                  bottom: -10,
+                  child: GestureDetector(
+                    onPanUpdate: (d) {
+                      setState(() {
+                        item.scale = (item.scale + d.delta.dx / 100).clamp(0.3, 4.0);
+                      });
+                    },
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF00D9FF),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.open_in_full, size: 14, color: Colors.black),
+                    ),
+                  ),
+                ),
+
+                // Rotation handle (top-right)
+                Positioned(
+                  right: -10,
+                  top: -10,
+                  child: GestureDetector(
+                    onPanUpdate: (d) {
+                      setState(() {
+                        item.rotation += d.delta.dx;
+                        item.rotation %= 360;
+                      });
+                    },
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        color: Colors.purple,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: const Icon(Icons.rotate_right, size: 14, color: Colors.white),
+                    ),
+                  ),
                 ),
               ],
-            ),
-          );
-        } else {
-          child =
-              item.file != null
-                  ? Image.file(
-                    item.file!,
-                    width: 200,
-                    height: 200,
-                    fit: BoxFit.contain,
-                  )
-                  : const SizedBox();
-        }
-
-        child = Transform.rotate(
-          angle: currRotation * math.pi / 180,
-          child: Transform.scale(scale: currScale, child: child),
-        );
-
-        final isSelected = selectedClipId == item.id;
-        if (isSelected) {
-          child = _buildResizableOverlay(item, child, screenSize);
-        }
-
-        list.add(Positioned(left: currX, top: currY, child: child));
-      }
-    }
-    return list;
-  }
-
-  Widget _buildResizableOverlay(
-    TimelineItem item,
-    Widget child,
-    Size screenSize,
-  ) {
-    return GestureDetector(
-      onScaleStart: (details) {
-        _saveToHistory();
-        _initialRotation = item.rotation;
-        _initialScale = item.scale;
-      },
-      onScaleUpdate: (details) {
-        setState(() {
-          // Handle rotation
-          item.rotation = _initialRotation + details.rotation * 180 / math.pi;
-
-          // Handle scale (REAL-TIME RESIZE)
-          item.scale = (_initialScale * details.scale).clamp(0.3, 5.0);
-
-          // Handle position
-          item.x = (item.x ?? 0) + details.focalPointDelta.dx;
-          item.y = (item.y ?? 0) + details.focalPointDelta.dy;
-
-          // Keep within bounds
-          final maxW =
-              screenSize.width -
-              (item.type == TimelineItemType.text ? 50 : 100) * item.scale;
-          final maxH =
-              screenSize.height -
-              (item.type == TimelineItemType.text ? 30 : 100) * item.scale;
-          item.x = item.x!.clamp(0.0, maxW);
-          item.y = item.y!.clamp(0.0, maxH);
-        });
-      },
-      onTap: () {
-        if (item.type == TimelineItemType.text) {
-          _showTextEditor(item);
-        }
-      },
-      child: Stack(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              border: Border.all(color: const Color(0xFF00D9FF), width: 2),
-            ),
-            child: child,
+            ],
           ),
-          // Resize handle (bottom-right)
-          Positioned(
-            right: -8,
-            bottom: -8,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                color: const Color(0xFF00D9FF),
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
-              ),
-              child: const Icon(
-                Icons.open_in_full,
-                size: 12,
-                color: Colors.black,
-              ),
-            ),
-          ),
-          // Rotation handle (top-right)
-          Positioned(
-            right: -8,
-            top: -8,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                color: Colors.purple,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
-              ),
-              child: const Icon(
-                Icons.rotate_right,
-                size: 12,
-                color: Colors.white,
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
+  }
+
+  List<Widget> _buildInteractiveOverlays(Size screenSize) {
+    final List<Widget> overlayWidgets = [];
+
+    // Get items to show based on timeline mode
+    List<TimelineItem> itemsToShow = [];
+
+    switch (_timelineDisplayMode) {
+      case TimelineDisplayMode.videoTextOnly:
+        itemsToShow = [...textItems];
+        break;
+      case TimelineDisplayMode.videoOverlayOnly:
+        itemsToShow = [...overlayItems];
+        break;
+      case TimelineDisplayMode.allTracks:
+      default:
+        itemsToShow = [...textItems, ...overlayItems];
+    }
+
+    // Sort by layer index
+    itemsToShow.sort((a, b) => a.layerIndex.compareTo(b.layerIndex));
+
+    for (final item in itemsToShow) {
+      // Check if within playhead time range
+      final isInTimeRange = playheadPosition >= item.startTime &&
+          playheadPosition < item.startTime + item.duration;
+
+      if (isInTimeRange) {
+        overlayWidgets.add(_buildDraggableOverlayItem(item, screenSize));
+      }
+    }
+
+    return overlayWidgets;
   }
 
   Widget _buildPlaybackControls() {
@@ -2462,126 +2317,147 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1A1A1A),
-      builder:
-          (_) => StatefulBuilder(
-            builder:
-                (ctx, setM) => Padding(
-                  padding: EdgeInsets.only(
-                    bottom: MediaQuery.of(context).viewInsets.bottom,
-                  ),
-                  child: Container(
-                    height: 450,
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      children: [
-                        const Text(
-                          'Edit Text',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: StatefulBuilder(
+          builder: (ctx, setModalState) => Container(
+            padding: const EdgeInsets.all(20),
+            height: 500,
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text(
+                        'Cancel',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                    const Text(
+                      'Edit Text',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          item.text = ctrl.text;
+                          item.textColor = tempColor;
+                          item.fontSize = tempSize;
+                        });
+                        Navigator.pop(context);
+                        _showMessage('Text updated');
+                      },
+                      child: const Text(
+                        'Done',
+                        style: TextStyle(
+                          color: Color(0xFF00D9FF),
+                          fontWeight: FontWeight.bold,
                         ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: ctrl,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: const InputDecoration(
-                            hintText: 'Enter text',
-                            hintStyle: TextStyle(color: Colors.white54),
-                            enabledBorder: UnderlineInputBorder(
-                              borderSide: BorderSide(color: Colors.white54),
-                            ),
-                            focusedBorder: UnderlineInputBorder(
-                              borderSide: BorderSide(color: Color(0xFF00D9FF)),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 20),
-                        const Text(
-                          'Color',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          children:
-                              [
-                                Colors.white,
-                                Colors.red,
-                                Colors.yellow,
-                                Colors.blue,
-                                Colors.green,
-                                Colors.purple,
-                                Colors.orange,
-                                Colors.pink,
-                              ].map((c) {
-                                final sel = c == tempColor;
-                                return GestureDetector(
-                                  onTap: () => setM(() => tempColor = c),
-                                  child: Container(
-                                    width: 40,
-                                    height: 40,
-                                    decoration: BoxDecoration(
-                                      color: c,
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color:
-                                            sel
-                                                ? const Color(0xFF00D9FF)
-                                                : Colors.transparent,
-                                        width: 3,
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                        ),
-                        const SizedBox(height: 20),
-                        const Text(
-                          'Font Size',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        Slider(
-                          value: tempSize,
-                          min: 10,
-                          max: 100,
-                          activeColor: const Color(0xFF00D9FF),
-                          onChanged: (v) => setM(() => tempSize = v),
-                        ),
-                        Text(
-                          '${tempSize.toInt()}',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                        const Spacer(),
-                        ElevatedButton(
-                          onPressed: () {
-                            setState(() {
-                              item.text = ctrl.text;
-                              item.textColor = tempColor;
-                              item.fontSize = tempSize;
-                            });
-                            Navigator.pop(ctx);
-                            _showMessage('Text updated');
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF00D9FF),
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 32,
-                              vertical: 12,
-                            ),
-                          ),
-                          child: const Text(
-                            'Apply',
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                        ),
-                      ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+
+                // Text input
+                TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.white, fontSize: 18),
+                  maxLines: 3,
+                  decoration: InputDecoration(
+                    hintText: 'Enter your text...',
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    filled: true,
+                    fillColor: const Color(0xFF2A2A2A),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFF00D9FF), width: 2),
                     ),
                   ),
                 ),
+
+                const SizedBox(height: 24),
+
+                // Font size
+                Row(
+                  children: [
+                    const Text('Size:', style: TextStyle(color: Colors.white)),
+                    Expanded(
+                      child: Slider(
+                        value: tempSize,
+                        min: 16,
+                        max: 80,
+                        activeColor: const Color(0xFF00D9FF),
+                        onChanged: (v) => setModalState(() => tempSize = v),
+                      ),
+                    ),
+                    Text(
+                      '${tempSize.toInt()}',
+                      style: const TextStyle(color: Color(0xFF00D9FF), fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 16),
+
+                // Color picker
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Color:', style: TextStyle(color: Colors.white)),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    Colors.white,
+                    Colors.black,
+                    Colors.red,
+                    Colors.blue,
+                    Colors.green,
+                    Colors.yellow,
+                    Colors.purple,
+                    Colors.orange,
+                    Colors.pink,
+                    Colors.cyan,
+                  ].map((c) {
+                    final sel = c == tempColor;
+                    return GestureDetector(
+                      onTap: () => setModalState(() => tempColor = c),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: c,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: sel ? const Color(0xFF00D9FF) : Colors.white24,
+                            width: sel ? 3 : 1,
+                          ),
+                        ),
+                        child: sel ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
           ),
+        ),
+      ),
     );
   }
 
@@ -2685,89 +2561,101 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 // 12. WRAP your timeline section with GestureDetector:
   Widget _buildTimelineSection() {
     final screenWidth = MediaQuery.of(context).size.width;
-    final totalDuration = _getTotalDuration();
-    final totalWidth = math.max(totalDuration * pixelsPerSecond, screenWidth);
+    final centerX = screenWidth / 2;
 
-    return Container(
-      color: const Color(0xFF000000),
-      child: GestureDetector(
-        // Add tap to seek
-        onTapDown: _onTimelineTap,
+    final bool isTablet = screenWidth > 700;
+    final double timelineHeight = isTablet ? 300 : 260;
 
-        // Your existing drag handlers
-        onHorizontalDragUpdate: (details) {
-          final deltaPx = details.delta.dx;
-          final deltaSec = deltaPx / pixelsPerSecond;
+    return SizedBox(
+      height: timelineHeight, // ← This eliminates overflow forever
+      child: Container(
+        color: const Color(0xFF000000),
+        child: GestureDetector(
+          onTapDown: _onTimelineTap,
+          onHorizontalDragUpdate: (details) {
+            final deltaPx = details.delta.dx;
+            final deltaSec = deltaPx / pixelsPerSecond;
+            setState(() {
+              playheadPosition += Duration(milliseconds: (deltaSec * 1000).round());
+              final total = Duration(seconds: _getTotalDuration().toInt());
+              playheadPosition = playheadPosition.clamp(Duration.zero, total);
 
-          setState(() {
-            playheadPosition += Duration(
-              milliseconds: (deltaSec * 1000).round(),
-            );
-
-            final total = Duration(seconds: _getTotalDuration().toInt());
-            playheadPosition = Duration(
-              milliseconds: playheadPosition.inMilliseconds.clamp(
-                0,
-                total.inMilliseconds,
-              ),
-            );
-
-            timelineOffset = playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
-
-            if (_timelineScrollController.hasClients) {
-              _timelineScrollController.jumpTo(timelineOffset);
-            }
-          });
-
-          _updatePreview();
-        },
-
-        onScaleUpdate: (details) {
-          if (details.scale == 1.0) return;
-
-          setState(() {
-            final oldPps = pixelsPerSecond;
-            pixelsPerSecond = (pixelsPerSecond * details.scale).clamp(50.0, 200.0);
-
-            final centerSec = timelineOffset / oldPps + screenWidth / 2 / oldPps;
-            timelineOffset = (centerSec - screenWidth / 2 / pixelsPerSecond) * pixelsPerSecond;
-            timelineOffset = timelineOffset.clamp(0.0, _getTotalDuration() * pixelsPerSecond);
-          });
-        },
-
-        child: Stack(
-          children: [
-            SingleChildScrollView(
-              controller: _timelineScrollController,
-              scrollDirection: Axis.horizontal,
-              physics: const ClampingScrollPhysics(),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: screenWidth,
-                  maxWidth: math.max(totalWidth + screenWidth, screenWidth),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 16, top: 8),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _buildDurationRuler(),
-                      const SizedBox(height: 8),
-                      _buildVideoTrack(),
-                      const SizedBox(height: 4),
-                      _buildAudioTrack(),
-                      const SizedBox(height: 4),
-                      _buildOverlayAndTextTrack(),
-                    ],
+              timelineOffset = playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
+              if (_timelineScrollController.hasClients) {
+                _timelineScrollController.jumpTo(timelineOffset.clamp(
+                  0.0,
+                  _timelineScrollController.position.maxScrollExtent,
+                ));
+              }
+            });
+            _updatePreview();
+          },
+          onScaleUpdate: (details) {
+            if (details.scale == 1.0) return;
+            setState(() {
+              final oldPps = pixelsPerSecond;
+              pixelsPerSecond = (pixelsPerSecond * details.scale).clamp(50.0, 300.0);
+              final centerSec = timelineOffset / oldPps + screenWidth / 2 / oldPps;
+              timelineOffset = (centerSec - screenWidth / 2 / pixelsPerSecond) * pixelsPerSecond;
+              timelineOffset = timelineOffset.clamp(0.0, _getTotalDuration() * pixelsPerSecond);
+            });
+          },
+          child: Stack(
+            children: [
+              SingleChildScrollView(
+                controller: _timelineScrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const ClampingScrollPhysics(),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minWidth: screenWidth,
+                    maxWidth: math.max(_getTotalDuration() * pixelsPerSecond + screenWidth, screenWidth),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildDurationRuler(),
+                        const SizedBox(height: 8),
+                        if (_shouldShowVideoTrack()) _buildVideoTrack(),
+                        if (_shouldShowVideoTrack()) const SizedBox(height: 4),
+                        if (_shouldShowAudioTrack()) _buildAudioTrack(),
+                        if (_shouldShowAudioTrack()) const SizedBox(height: 4),
+                        if (_shouldShowTextTrack()) _buildTextTrack(),
+                        if (_shouldShowTextTrack()) const SizedBox(height: 4),
+                        if (_shouldShowOverlayTrack()) _buildOverlayTrack(),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            _buildCenteredPlayhead(),
-          ],
+              _buildCenteredPlayhead(),
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  // ADD these helper methods for track visibility
+  bool _shouldShowVideoTrack() {
+    return true; // Always show video track
+  }
+
+  bool _shouldShowAudioTrack() {
+    return _timelineDisplayMode == TimelineDisplayMode.allTracks ||
+        _timelineDisplayMode == TimelineDisplayMode.videoAudioOnly;
+  }
+
+  bool _shouldShowTextTrack() {
+    return _timelineDisplayMode == TimelineDisplayMode.allTracks ||
+        _timelineDisplayMode == TimelineDisplayMode.videoTextOnly;
+  }
+
+  bool _shouldShowOverlayTrack() {
+    return _timelineDisplayMode == TimelineDisplayMode.allTracks ||
+        _timelineDisplayMode == TimelineDisplayMode.videoOverlayOnly;
   }
 
   // 11. ADDITIONAL: Tap timeline to seek
@@ -2803,7 +2691,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     // Update preview
     _updatePreview();
   }
-
 
   Widget _buildVideoTrack() {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -2875,29 +2762,37 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
 
     final thumbCount = item.thumbnailBytes!.length;
-    final thumbWidth = 120.0; // Each thumbnail is 120px wide
-    final totalThumbsNeeded = (clipWidth / thumbWidth).ceil();
+    final thumbWidth = 120.0;
 
-    return Row(
-      children: List.generate(totalThumbsNeeded, (i) {
-        // Loop through available thumbnails
-        final thumbIndex = i % thumbCount;
-        final bytes = item.thumbnailBytes![thumbIndex];
-
-        return SizedBox(
-          width: thumbWidth,
-          child: Image.memory(
-            bytes,
-            fit: BoxFit.cover,
-            gaplessPlayback: true,
-            errorBuilder:
-                (_, __, ___) => Container(
-              color: const Color(0xFF2A2A2A),
-              child: const Icon(Icons.error, color: Colors.white30),
-            ),
-          ),
-        );
-      }),
+    // We want smooth repeating thumbnails
+    return ClipRRect(  // Prevents any overflow from showing
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: clipWidth,
+        height: 60,
+        child: ListView.builder(
+          scrollDirection: Axis.horizontal,
+          physics: const NeverScrollableScrollPhysics(), // No user scroll
+          itemCount: (clipWidth / thumbWidth).ceil() + 5, // +5 for safety
+          itemBuilder: (context, index) {
+            final thumbIndex = index % thumbCount;
+            final bytes = item.thumbnailBytes![thumbIndex];
+            return SizedBox(
+              width: thumbWidth,
+              height: 60,
+              child: Image.memory(
+                bytes,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => Container(
+                  color: const Color(0xFF2A2A2A),
+                  child: const Icon(Icons.error, color: Colors.white30),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -2907,7 +2802,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final centerX = screenWidth / 2;
 
     return Container(
-      height: 50,
+      height: 40,
       decoration: BoxDecoration(
         color: const Color(0xFF0A0A0A),
         border: Border(
@@ -2916,33 +2811,46 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
       child: Stack(
         children: [
+          // LEFT: Track Label (FIXED positioning)
+          Positioned(
+            left: centerX - timelineOffset - 60,
+          //  left: math.max(28, centerX - timelineOffset - 120),
+            top: 6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(4),
+              ),
+
+              child: Icon(Icons.audiotrack),
+            ),
+          ),
+
           // Audio clips
           ...audioItems.map((audio) => _buildAudioClip(audio, centerX)),
-          // RIGHT: Add Audio button
+
+          // RIGHT: Add Audio button (FIXED)
           Positioned(
-            right: 0,
-            top: 0,
+            right: 12,
+            top: 11,
             child: GestureDetector(
               onTap: _addAudio,
               child: Container(
-                margin: const EdgeInsets.only(left: 12, right: 12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 8,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1A1A1A),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(6),
                   border: Border.all(color: Colors.white24),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: const [
-                    Icon(Icons.add, color: Color(0xFF00D9FF), size: 16),
-                    SizedBox(width: 4),
+                    Icon(Icons.add, color: Color(0xFF00D9FF), size: 12),
+                    SizedBox(width: 3),
                     Text(
-                      'Add audio',
-                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                      'Add',
+                      style: TextStyle(color: Colors.white70, fontSize: 10),
                     ),
                   ],
                 ),
@@ -2954,14 +2862,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     );
   }
 
-  Widget _buildOverlayAndTextTrack() {
+  // ADD enhanced text track
+  Widget _buildTextTrack() {
     final screenWidth = MediaQuery.of(context).size.width;
     final centerX = screenWidth / 2;
-    final combinedItems = [...overlayItems, ...textItems]
-      ..sort((a, b) => a.startTime.compareTo(b.startTime));
 
     return Container(
-      height: 50,
+      height: 40,
       decoration: BoxDecoration(
         color: const Color(0xFF0A0A0A),
         border: Border(
@@ -2970,30 +2877,96 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
       child: Stack(
         children: [
-          // Overlay items
-          // ...overlayItems.map((overlay) => _buildOverlayClip(overlay, centerX)),
-          // Text items
-          // ...textItems.map((text) => _buildTextClip(text, centerX)),
-          ...combinedItems.map(
-            (item) =>
-                item.type == TimelineItemType.text
-                    ? _buildTextClip(item, centerX)
-                    : _buildOverlayClip(item, centerX),
+          // LEFT: Track Label (FIXED)
+          Positioned(
+            left: centerX - timelineOffset - 60,
+           // left: math.max(8, centerX - timelineOffset - 100),
+            top: 6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child:Icon(Icons.text_fields)
+            ),
           ),
-          // RIGHT: Add Text button
+
+          // Text clips
+          ...textItems.map((text) => _buildTextClip(text, centerX)),
+
+          // RIGHT: Add Text button (FIXED)
           Positioned(
             right: 12,
-            top: 11,
+            top: 14,
             child: GestureDetector(
               onTap: _addText,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.add, color: Colors.white, size: 16),
-                  const SizedBox(width: 4),
-                  const Text(
-                    'Add text',
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                children: const [
+                  Icon(Icons.add, color: Colors.white, size: 14),
+                  SizedBox(width: 3),
+                  Text(
+                    'Add',
+                    style: TextStyle(color: Colors.white70, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ADD enhanced overlay track
+  Widget _buildOverlayTrack() {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final centerX = screenWidth / 2;
+
+    return Container(
+      height: 40,
+      decoration: BoxDecoration(
+        color: const Color(0xFF0A0A0A),
+        border: Border(
+          bottom: BorderSide(color: Colors.white.withOpacity(0.1), width: 0.5),
+        ),
+      ),
+      child: Stack(
+        children: [
+          // LEFT: Track Label (FIXED)
+          Positioned(
+            left: centerX - timelineOffset - 60,
+           // left: math.max(8, centerX - timelineOffset - 100),
+            top: 6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Icon(Icons.format_overline)
+              ),
+            ),
+
+
+          // Overlay items (showing thumbnails)
+          ...overlayItems.map((item) => _buildOverlayClip(item, centerX)),
+
+          // RIGHT: Add button (FIXED)
+          Positioned(
+            right: 12,
+            top: 14,
+            child: GestureDetector(
+              onTap: _addImage,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.add, color: Colors.white, size: 14),
+                  SizedBox(width: 3),
+                  Text(
+                    'Add',
+                    style: TextStyle(color: Colors.white70, fontSize: 10),
                   ),
                 ],
               ),
@@ -3006,8 +2979,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   Widget _buildOverlayClip(TimelineItem item, double centerX) {
     final selected = selectedClipId == item.id;
-    final startX =
-        item.startTime.inMilliseconds / 1000 * pixelsPerSecond - timelineOffset;
+    final startX = item.startTime.inMilliseconds / 1000 * pixelsPerSecond - timelineOffset;
     final width = _clipWidth(item);
 
     return Positioned(
@@ -3025,9 +2997,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         onHorizontalDragStart: (_) => _saveToHistory(),
         onHorizontalDragUpdate: (d) {
           final deltaSec = d.delta.dx / pixelsPerSecond;
-          final newStart =
-              item.startTime +
-              Duration(milliseconds: (deltaSec * 1000).round());
+          final newStart = item.startTime + Duration(milliseconds: (deltaSec * 1000).round());
           if (newStart >= Duration.zero) {
             setState(() {
               item.startTime = newStart;
@@ -3048,14 +3018,19 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
               width: 2,
             ),
           ),
-          child: Center(
-            child:
-                item.file != null
-                    ? ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: Image.file(item.file!, fit: BoxFit.cover),
-                    )
-                    : const Icon(Icons.image, color: Colors.white, size: 20),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: item.file != null
+                ? Image.file(
+              item.file!,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const Icon(
+                Icons.image,
+                color: Colors.white,
+                size: 20,
+              ),
+            )
+                : const Icon(Icons.image, color: Colors.white, size: 20),
           ),
         ),
       ),
@@ -3368,28 +3343,24 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     _saveToHistory();
 
     setState(() {
+      // Remove from lists
       clips.removeWhere((c) => c.id == id);
-      if (_controllers.containsKey(id)) {
-        // Don't dispose if shared with duplicates
-        final shareCount =
-            clips.where((c) => _controllers[c.id] == _controllers[id]).length;
-        if (shareCount == 0) {
-          _controllers[id]!.dispose();
-          _controllers.remove(id);
-        }
-      }
       audioItems.removeWhere((c) => c.id == id);
-      if (_audioControllers.containsKey(id)) {
-        _audioControllers[id]!.dispose();
-        _audioControllers.remove(id);
-      }
       textItems.removeWhere((c) => c.id == id);
       overlayItems.removeWhere((c) => c.id == id);
+
+      // Dispose and remove player
+      if (_audioPlayers.containsKey(id)) {
+        _audioPlayers[id]!.dispose();
+        _audioPlayers.remove(id);
+      }
+
       selectedClip = null;
     });
 
     _showMessage('Deleted');
   }
+
 
 // 8. FIXED: Add video with immediate preview
   Future<void> _addVideo() async {
@@ -3484,54 +3455,51 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   Future<void> _addAudio() async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.audio);
-    if (result == null || result.files.isEmpty) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      allowMultiple: false,
+    );
 
-    final path = result.files.first.path;
-    if (path == null) return;
+    if (result == null || result.files.isEmpty || result.files.first.path == null) return;
+
+    final path = result.files.first.path!;
+    final fileName = result.files.first.name;
 
     _showLoading();
-    try {
-      final file = File(path);
-      final ctrl = VideoPlayerController.file(file);
-      await ctrl.initialize();
-      final duration = ctrl.value.duration;
 
-      final waveform = await _generateWaveform(path);
+    try {
+      final player = AudioPlayer();
+      await player.setFilePath(path); // This never crashes
+
+      final duration = player.duration ?? const Duration(seconds: 10);
+
+      final waveform = List.generate(200, (_) => 0.2 + math.Random().nextDouble() * 0.6);
 
       final item = TimelineItem(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         type: TimelineItemType.audio,
-        file: file,
+        file: File(path),
         startTime: playheadPosition,
         duration: duration,
         originalDuration: duration,
-        trimStart: Duration.zero,
-        trimEnd: duration,
         waveformData: waveform,
         volume: 1.0,
-        text: result.files.first.name,
+        text: fileName,
       );
 
-      _audioControllers[item.id] = ctrl;
-
-      // Set up audio controller
-      await ctrl.setVolume(item.volume);
-      await ctrl.setPlaybackSpeed(1.0);
+      _audioPlayers[item.id] = player;
 
       _saveToHistory();
       setState(() {
         audioItems.add(item);
         audioItems.sort((a, b) => a.startTime.compareTo(b.startTime));
-        selectedClip = int.parse(item.id);
       });
 
-      _updatePreview();
       _hideLoading();
-      _showMessage('Audio added');
+      _showMessage('Audio added: $fileName');
     } catch (e) {
       _hideLoading();
-      _showError('Failed to load audio: $e');
+      _showError('Failed to load audio');
     }
   }
 
@@ -3540,44 +3508,68 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return List.generate(200, (_) => random.nextDouble() * 0.8 + 0.1);
   }
 
+// 9. ENHANCED _addImage to generate thumbnails:
   Future<void> _addImage() async {
     final XFile? file = await _picker.pickImage(source: ImageSource.gallery);
     if (file == null) return;
 
-    Duration imageDur = const Duration(seconds: 5);
-    final activeVideo = _findActiveVideo();
-    if (activeVideo != null) {
-      imageDur = activeVideo.duration;
+    _showLoading();
+
+    try {
+      Duration imageDur = const Duration(seconds: 5);
+      final activeVideo = _findActiveVideo();
+      if (activeVideo != null) {
+        imageDur = activeVideo.duration;
+      }
+
+      // Read image bytes for timeline thumbnail
+      final imageFile = File(file.path);
+      final bytes = await imageFile.readAsBytes();
+
+      final screenSize = MediaQuery.of(context).size;
+
+      final item = TimelineItem(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        type: TimelineItemType.image,
+        file: imageFile,
+        startTime: playheadPosition,
+        duration: imageDur,
+        originalDuration: imageDur,
+        x: screenSize.width / 2 - 100,
+        y: screenSize.height / 2 - 100,
+        scale: 1.0,
+        rotation: 0.0,
+        layerIndex: _nextLayerIndex++,
+        thumbnailBytes: [bytes], // Store for timeline display
+      );
+
+      _saveToHistory();
+
+      setState(() {
+        overlayItems.add(item);
+        overlayItems.sort((a, b) => a.startTime.compareTo(b.startTime));
+        selectedClipId = item.id;
+        _selection.select(item.id, item.type);
+
+        // Force update
+        playheadPosition = item.startTime;
+      });
+
+      _hideLoading();
+      debugPrint('✅ Image added: ${item.id} at ${item.startTime}');
+      _showMessage('Image added - Drag to reposition');
+    } catch (e) {
+      _hideLoading();
+      debugPrint('❌ Error adding image: $e');
+      _showError('Failed to add image: $e');
     }
-
-    _saveToHistory();
-    final item = TimelineItem(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      type: TimelineItemType.image,
-      file: File(file.path),
-      startTime: playheadPosition,
-      duration: imageDur,
-      originalDuration: imageDur,
-      x: 50,
-      y: 100,
-      scale: 1.0,
-      rotation: 0.0,
-      layerIndex: _nextLayerIndex++,
-    );
-
-    setState(() {
-      overlayItems.add(item);
-      overlayItems.sort((a, b) => a.startTime.compareTo(b.startTime));
-      selectedClip = int.parse(item.id);
-      playheadPosition = item.startTime;
-      timelineOffset = playheadPosition.inMilliseconds / 1000 * pixelsPerSecond;
-    });
-
-    _showMessage('Image added');
   }
 
   void _addText() {
     _saveToHistory();
+
+    final screenSize = MediaQuery.of(context).size;
+
     final item = TimelineItem(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       type: TimelineItemType.text,
@@ -3590,16 +3582,20 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       textColor: Colors.white,
       fontSize: 36,
       scale: 1.0,
+      rotation: 0.0,
       layerIndex: _nextLayerIndex++,
     );
 
     setState(() {
       textItems.add(item);
       textItems.sort((a, b) => a.startTime.compareTo(b.startTime));
+      selectedClipId = item.id;
       _selection.select(item.id, item.type);
     });
 
-    // Open text editor bottom sheet
+    debugPrint('✅ Text added: ${item.id} at ${item.startTime}');
+
+    // Show text bottom sheet with templates/fonts/animation
     _showTextBottomSheet(item);
   }
 
@@ -3608,166 +3604,166 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder:
-          (_) => DraggableScrollableSheet(
-            initialChildSize: 0.6,
-            minChildSize: 0.4,
-            maxChildSize: 0.95,
-            builder:
-                (_, scrollController) => Container(
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF1A1A1A),
-                    borderRadius: BorderRadius.vertical(
-                      top: Radius.circular(20),
-                    ),
-                  ),
-                  child: DefaultTabController(
-                    length: 3,
-                    child: Column(
-                      children: [
-                        // Header with search + Done
-                        Container(
-                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: TextField(
-                                  decoration: InputDecoration(
-                                    hintText:
-                                        'Search fonts, templates, animations...',
-                                    hintStyle: const TextStyle(
-                                      color: Colors.white54,
-                                    ),
-                                    filled: true,
-                                    fillColor: const Color(0xFF2A2A2A),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide.none,
-                                    ),
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 12,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              TextButton(
-                                onPressed: () => Navigator.pop(context),
-                                child: const Text(
-                                  'Done',
-                                  style: TextStyle(
-                                    color: Color(0xFF00D9FF),
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        builder: (_, scrollController) => Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF1A1A1A),
+            borderRadius: BorderRadius.vertical(
+              top: Radius.circular(20),
+            ),
+          ),
+          child: DefaultTabController(
+            length: 3,
+            child: Column(
+              children: [
+                // Header with search + Done
+                Container(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          onChanged: (value) {
+                            // Update text in real-time
+                            setState(() {
+                              item.text = value.isEmpty ? "New Text" : value;
+                            });
+                          },
+                          decoration: InputDecoration(
+                            hintText: 'Search fonts, templates, animations...',
+                            hintStyle: const TextStyle(color: Colors.white54),
+                            filled: true,
+                            fillColor: const Color(0xFF2A2A2A),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                            prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                          ),
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text(
+                          'Done',
+                          style: TextStyle(
+                            color: Color(0xFF00D9FF),
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
-
-                        // Tab bar
-                        const TabBar(
-                          tabs: [
-                            Tab(text: 'Templates'),
-                            Tab(text: 'Fonts'),
-                            Tab(text: 'Animation'),
-                          ],
-                          labelColor: Color(0xFF00D9FF),
-                          unselectedLabelColor: Colors.white70,
-                          indicatorColor: Color(0xFF00D9FF),
-                        ),
-
-                        // Tab content
-                        Expanded(
-                          child: TabBarView(
-                            children: [
-                              // Templates
-                              GridView.builder(
-                                padding: const EdgeInsets.all(16),
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: 3,
-                                      childAspectRatio: 1,
-                                      mainAxisSpacing: 12,
-                                      crossAxisSpacing: 12,
-                                    ),
-                                itemCount: 15,
-                                itemBuilder:
-                                    (_, i) => Container(
-                                      decoration: BoxDecoration(
-                                        color: Colors.grey[800],
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                      child: const Center(
-                                        child: Text(
-                                          'Template',
-                                          style: TextStyle(color: Colors.white),
-                                        ),
-                                      ),
-                                    ),
-                              ),
-
-                              // Fonts
-                              ListView.builder(
-                                itemBuilder:
-                                    (_, i) => ListTile(
-                                      title: Text(
-                                        'Font Style $i',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                      onTap: () {
-                                        setState(
-                                          () => item.fontSize = 28.0 + i * 4,
-                                        );
-                                      },
-                                    ),
-                                itemCount: 30,
-                              ),
-
-                              // Animations
-                              ListView(
-                                children: [
-                                  ListTile(
-                                    title: const Text('Fade In'),
-                                    onTap:
-                                        () => setState(
-                                          () => item.animationIn = 'fade_in',
-                                        ),
-                                  ),
-                                  ListTile(
-                                    title: const Text('Slide Up'),
-                                    onTap:
-                                        () => setState(
-                                          () => item.animationIn = 'slide_up',
-                                        ),
-                                  ),
-                                  ListTile(
-                                    title: const Text('Bounce'),
-                                    onTap:
-                                        () => setState(
-                                          () => item.animationIn = 'bounce',
-                                        ),
-                                  ),
-                                  ListTile(
-                                    title: const Text('Zoom In'),
-                                    onTap:
-                                        () => setState(
-                                          () => item.animationIn = 'zoom_in',
-                                        ),
-                                  ),
-                                  // Add more as needed
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
+
+                // Tab bar
+                const TabBar(
+                  tabs: [
+                    Tab(text: 'Templates'),
+                    Tab(text: 'Fonts'),
+                    Tab(text: 'Animation'),
+                  ],
+                  labelColor: Color(0xFF00D9FF),
+                  unselectedLabelColor: Colors.white70,
+                  indicatorColor: Color(0xFF00D9FF),
+                ),
+
+                // Tab content
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      // Templates tab
+                      GridView.builder(
+                        padding: const EdgeInsets.all(16),
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          childAspectRatio: 1,
+                          mainAxisSpacing: 12,
+                          crossAxisSpacing: 12,
+                        ),
+                        itemCount: 15,
+                        itemBuilder: (_, i) => GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              item.text = "Template ${i + 1}";
+                              item.fontSize = 32.0 + (i * 2);
+                            });
+                          },
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.grey[800],
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Center(
+                              child: Text(
+                                'Style ${i + 1}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      // Fonts tab
+                      ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: 20,
+                        itemBuilder: (_, i) => ListTile(
+                          title: Text(
+                            'Font Style ${i + 1}',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16.0 + i,
+                            ),
+                          ),
+                          onTap: () {
+                            setState(() {
+                              item.fontSize = 24.0 + (i * 2);
+                            });
+                          },
+                        ),
+                      ),
+
+                      // Animations tab
+                      ListView(
+                        padding: const EdgeInsets.all(16),
+                        children: [
+                          _animationTile('Fade In', () {
+                            setState(() => item.animationIn = 'fade_in');
+                          }),
+                          _animationTile('Slide Up', () {
+                            setState(() => item.animationIn = 'slide_up');
+                          }),
+                          _animationTile('Bounce', () {
+                            setState(() => item.animationIn = 'bounce');
+                          }),
+                          _animationTile('Zoom In', () {
+                            setState(() => item.animationIn = 'zoom_in');
+                          }),
+                          _animationTile('Typewriter', () {
+                            setState(() => item.animationIn = 'typewriter');
+                          }),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
+        ),
+      ),
     );
   }
 
@@ -4112,25 +4108,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return (secs * pixelsPerSecond).clamp(60.0, double.infinity);
   }
 
-  Widget _buildPlaceholder() {
-    return Container(
-      color: const Color(0xFF1A1A1A),
-      child: const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.videocam, size: 64, color: Colors.white38),
-            SizedBox(height: 16),
-            Text(
-              'Add a video to start editing',
-              style: TextStyle(color: Colors.white38, fontSize: 14),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   void openToolPanel(String category) {
     setState(() {
       _activeToolCategory = category;
@@ -4159,4 +4136,107 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       curve: Curves.easeIn,
     );
   }
+
+  Widget _buildBottomNavWithBackButton() {
+    return Container(
+      height: 80,
+      color: Colors.black,
+      child: Row(
+        children: [
+          // Back button (shown when in special mode)
+          if (_showBackButton)
+            IconButton(
+              icon: Icon(
+                Icons.keyboard_arrow_down,
+                color: Colors.white,
+                size: 28,
+              ),
+              onPressed: () {
+                setState(() {
+                  _currentNavMode = BottomNavMode.normal;
+                  _timelineDisplayMode = TimelineDisplayMode.allTracks;
+                  _showBackButton = false;
+                });
+              },
+            ),
+
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _navButton(
+                    Icons.edit,
+                    'Edit',
+                        () => _openNavMode(BottomNavMode.edit),
+                  ),
+                  _navButton(
+                    Icons.audiotrack,
+                    'Audio',
+                        () => _openNavMode(BottomNavMode.audio),
+                  ),
+                  _navButton(
+                    Icons.text_fields,
+                    'Text',
+                        () => _openNavMode(BottomNavMode.text),
+                  ),
+                  _navButton(
+                    Icons.emoji_emotions,
+                    'Stickers',
+                        () => _openNavMode(BottomNavMode.stickers),
+                  ),
+                  _navButton(
+                    Icons.layers,
+                    'Overlay',
+                        () => _openNavMode(BottomNavMode.overlay),
+                  ),
+                  _navButton(
+                    Icons.auto_awesome,
+                    'Effects',
+                        () => _openNavMode(BottomNavMode.effects),
+                  ),
+                  _navButton(
+                    Icons.filter,
+                    'Filters',
+                        () => _openNavMode(BottomNavMode.filters),
+                  ),
+                  _navButton(
+                    Icons.animation,
+                    'Animation',
+                        () => _openNavMode(BottomNavMode.animation),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _animationTile(String title, VoidCallback onTap) {
+    return ListTile(
+      leading: const Icon(Icons.animation, color: Color(0xFF00D9FF)),
+      title: Text(title, style: const TextStyle(color: Colors.white)),
+      trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
+      onTap: onTap,
+    );
+  }
+
+// 7. DEBUG Helper - Add this to see what's happening
+  void _debugOverlayState() {
+    debugPrint('=== OVERLAY DEBUG ===');
+    debugPrint('Text items: ${textItems.length}');
+    debugPrint('Overlay items: ${overlayItems.length}');
+    debugPrint('Playhead: $playheadPosition');
+    debugPrint('Timeline mode: $_timelineDisplayMode');
+    for (var item in textItems) {
+      debugPrint('  Text "${item.text}" at ${item.startTime} - ${item.startTime + item.duration}');
+    }
+    for (var item in overlayItems) {
+      debugPrint('  Image at ${item.startTime} - ${item.startTime + item.duration}');
+    }
+    debugPrint('====================');
+  }
+
 }

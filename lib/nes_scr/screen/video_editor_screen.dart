@@ -13,6 +13,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:kwaic/nes_scr/screen/video_editor_helpers.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:video_player/video_player.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
@@ -58,12 +59,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   bool isPlaying = false;
   Duration playheadPosition = Duration.zero;
   int? selectedClip;
-  double pixelsPerSecond = 100.0; // current zoom level
+  double pixelsPerSecond = 100.0;
   double minPixelsPerSecond = 50.0;
   double maxPixelsPerSecond = 300.0;
   double timelineOffset = 0.0;
 
-  // Changed from VlcPlayerController to VideoPlayerController
   final Map<String, VideoPlayerController> _controllers = {};
   VideoPlayerController? _activeVideoController;
   TimelineItem? _activeItem;
@@ -103,21 +103,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   String? currentTool;
   bool _isDraggingClip = false;
 
-
   final Map<int, VideoTransition> clipTransitions = {};
   bool _isBottomNavCollapsed = false;
 
-  // Crop system — normalized values (0.0 to 1.0)
   double cropX = 0.0;
   double cropY = 0.0;
   double cropWidth = 1.0;
   double cropHeight = 1.0;
 
-  // NEW: Selected tool category
   String? selectedToolCategory;
   String? selectedClipId;
 
-  // Add these variables
   late String currentProjectId;
   late String currentProjectName;
   late HistoryManager historyManager;
@@ -127,24 +123,20 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   final ScrollController _timelineScrollController = ScrollController();
   final ScrollController _editToolsScrollController = ScrollController();
 
-
   late AnimationController _bottomNavAnimController;
   late Animation<double> _bottomNavHeightAnim;
   late AnimationController _previewAnimationController;
 
   late ScrollController timelineController;
 
-  // Replace your current bottom nav state with these:
   bool _isToolPanelOpen = false;
-  String?
-  _activeToolCategory; // 'edit', 'audio', 'text', 'stickers', 'effects', etc.
+  String? _activeToolCategory;
 
   late AnimationController _toolPanelController;
   late Animation<double> _toolPanelHeight;
 
   final DraggableScrollableController _draggableController =
-      DraggableScrollableController();
-
+  DraggableScrollableController();
 
   ClipSelectionState _selection = ClipSelectionState();
   BottomNavMode _currentNavMode = BottomNavMode.normal;
@@ -162,6 +154,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   TimelineDisplayMode _timelineDisplayMode = TimelineDisplayMode.allTracks;
   bool _showBackButton = false;
 
+  // Previous fixes
+  double _lastTimelineScrollPosition = 0.0;
+  bool _isReturningFromToolPanel = false;
+  bool _isEditingTimeline = false;
+
+  // NEW: Trim Mode state
+  bool _isTrimMode = false;
+  String? _trimClipId;
+  bool _trimAtStart = false; // true = trimming start, false = trimming end
+  Duration _trimFixedPosition = Duration.zero;
+
   @override
   void initState() {
     super.initState();
@@ -177,7 +180,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     playheadNotifier.addListener(() => setState(() {}));
     _timelineScrollController.addListener(() {
-      setState(() => timelineOffset = _timelineScrollController.offset);
+      setState(() {
+        timelineOffset = _timelineScrollController.offset;
+        _lastTimelineScrollPosition = timelineOffset;
+      });
     });
 
     if (widget.initialVideos != null && widget.initialVideos!.isNotEmpty) {
@@ -191,7 +197,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     if (ctrl == null || !ctrl.value.isInitialized) return false;
     return ctrl.value.position > Duration.zero;
   }
-
 
   TimelineItem? getClipAtPlayhead() {
     for (final clip in clips) {
@@ -215,7 +220,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         final controller = VideoPlayerController.file(File(path));
         await controller.initialize();
 
-        // Force first frame to avoid black screen
         await controller.seekTo(const Duration(milliseconds: 100));
         await Future.delayed(const Duration(milliseconds: 250));
         await controller.seekTo(Duration.zero);
@@ -255,7 +259,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
-// 4. FIXED: Smooth clip switching with proper sync
+  // FIX: Enhanced _switchToClip to prevent black screen
   Future<void> _switchToClip(TimelineItem item) async {
     final ctrl = _controllers[item.id];
     if (ctrl == null || !ctrl.value.isInitialized) return;
@@ -273,19 +277,27 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       await ctrl.setPlaybackSpeed(targetSpeed);
       await Future.delayed(const Duration(milliseconds: 80));
 
-      // Force frame to appear — kills black screen
-      if (sourcePos > const Duration(seconds: 1)) {
+      // FIX: Always seek to show a frame, even at start
+      if (sourcePos <= Duration.zero) {
+        await ctrl.seekTo(const Duration(milliseconds: 100));
+        await Future.delayed(const Duration(milliseconds: 150));
+        await ctrl.seekTo(Duration.zero);
+      } else if (sourcePos > const Duration(seconds: 1)) {
         await ctrl.seekTo(sourcePos - const Duration(milliseconds: 500));
         await Future.delayed(const Duration(milliseconds: 200));
+        await ctrl.seekTo(sourcePos);
+      } else {
+        await ctrl.seekTo(sourcePos);
       }
-      await ctrl.seekTo(sourcePos);
+
+      // FIX: Ensure frame is visible before continuing
+      int attempts = 0;
+      while (attempts < 30 && !_isVideoFrameReady) {
+        await Future.delayed(const Duration(milliseconds: 50));
+        attempts++;
+      }
 
       if (isPlaying) {
-        int attempts = 0;
-        while (attempts < 30 && !_isVideoFrameReady) {
-          await Future.delayed(const Duration(milliseconds: 50));
-          attempts++;
-        }
         await ctrl.play();
         ctrl.addListener(_updateFromController);
       }
@@ -294,6 +306,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
     if (mounted) setState(() {});
   }
+
 
   Future<List<Uint8List>> _generateRobustThumbnails(String videoPath, Duration duration) async {
     final thumbnails = <Uint8List>[];
@@ -326,12 +339,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return thumbnails;
   }
 
-
-  Future<List<Uint8List>> _generateFallbackThumbnails(
-      String videoPath,
-      Duration duration,
-      )
-  async {
+  Future<List<Uint8List>> _generateFallbackThumbnails(String videoPath, Duration duration) async {
     final List<Uint8List> thumbs = [];
     final ms = duration.inMilliseconds;
     final count = (duration.inSeconds / 2).clamp(8.0, 25.0).toInt();
@@ -349,8 +357,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return thumbs;
   }
 
-
-// 7. FIXED: Toggle play/pause with proper state management
+  // FIX 1: ENHANCED TOGGLE PLAY/PAUSE - PROPERLY STOPS AUDIO
   void togglePlayPause() async {
     if (_activeVideoController == null || !_activeVideoController!.value.isInitialized) {
       _showMessage('No video loaded');
@@ -370,13 +377,29 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
       await _activeVideoController!.play();
       _activeVideoController!.addListener(_updateFromController);
+      _playAudioTracks();
     } else {
       _activeVideoController!.removeListener(_updateFromController);
       await _activeVideoController!.pause();
+      await _pauseAllAudio();
       await _updatePreviewImmediate();
     }
   }
 
+  // FIX 2: NEW METHOD - PROPERLY PAUSE ALL AUDIO
+  Future<void> _pauseAllAudio() async {
+    for (final player in _audioPlayers.values) {
+      try {
+        if (player.playing) {
+          await player.pause();
+        }
+      } catch (e) {
+        debugPrint('Error pausing audio: $e');
+      }
+    }
+  }
+
+  // FIX 4: ENHANCED UPDATE FROM CONTROLLER - BETTER SYNC AND POSITION TRACKING
   void _updateFromController() {
     if (!mounted || !isPlaying || _activeVideoController == null) return;
 
@@ -387,30 +410,34 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     playheadNotifier.value = globalPos.clamp(Duration.zero, Duration(seconds: _getTotalDuration().toInt()));
 
-    final targetOffset = (playheadNotifier.value.inMilliseconds / 1000 * pixelsPerSecond) -
-        (MediaQuery.of(context).size.width / 2);
+    if (!_isEditingTimeline && !_isReturningFromToolPanel && !_isTrimMode) {
+      final targetOffset = (playheadNotifier.value.inMilliseconds / 1000 * pixelsPerSecond) -
+          (MediaQuery.of(context).size.width / 2);
 
-    if (_timelineScrollController.hasClients) {
-      _timelineScrollController.jumpTo(
-        targetOffset.clamp(0.0, _timelineScrollController.position.maxScrollExtent),
-      );
+      if (_timelineScrollController.hasClients) {
+        _timelineScrollController.jumpTo(
+          targetOffset.clamp(0.0, _timelineScrollController.position.maxScrollExtent),
+        );
+        _lastTimelineScrollPosition = _timelineScrollController.offset;
+      }
     }
 
-    _playAudioTracks();
+    if (isPlaying) {
+      _playAudioTracks();
+    }
   }
 
+  // FIX 5: ENHANCED DISPOSE - ENSURE ALL AUDIO/VIDEO STOPS
   @override
   void dispose() {
     isPlaying = false;
     _activeVideoController?.removeListener(_updateFromController);
 
-    // Dispose all video controllers
     for (final c in _controllers.values) {
       c.pause();
       c.dispose();
     }
 
-    // Dispose all audio players
     for (final player in _audioPlayers.values) {
       player.pause();
       player.dispose();
@@ -418,8 +445,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     _audioPlayers.clear();
     _controllers.clear();
-
-    // Dispose other resources
     _timelineScrollController.dispose();
     _previewDebouncer.dispose();
     autosaveManager.stop();
@@ -428,22 +453,20 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     super.dispose();
   }
 
-
   void _saveToHistory() {
     final state = EditorState(
       clips: clips.map((c) => c.copyWith()).toList(),
       audioItems: audioItems.map((a) => a.copyWith()).toList(),
       textItems: textItems.map((t) => t.copyWith()).toList(),
       overlayItems: overlayItems.map((o) => o.copyWith()).toList(),
-      selectedClip: null, // legacy field — can be null
-      selection: _selection.copy(), // ← this is the real one
+      selectedClip: null,
+      selection: _selection.copy(),
       playheadPosition: playheadPosition,
     );
     historyManager.saveState(state);
     autosaveManager.markChanged();
   }
 
-  // 4. Replace _undo and _redo
   void _undo() {
     final state = historyManager.undo();
     if (state != null) {
@@ -474,9 +497,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
-
-// Play audio tracks during playback
+  // FIX 3: ENHANCED AUDIO PLAYBACK WITH PROPER SYNC AND STATE CHECKING
   void _playAudioTracks() async {
+    if (!isPlaying) {
+      await _pauseAllAudio();
+      return;
+    }
+
     for (final audio in audioItems) {
       final player = _audioPlayers[audio.id];
       if (player == null) continue;
@@ -484,18 +511,20 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       final inRange = playheadNotifier.value >= audio.startTime &&
           playheadNotifier.value < audio.startTime + audio.duration;
 
-      if (inRange) {
+      if (inRange && isPlaying) {
         final targetPos = audio.trimStart + (playheadNotifier.value - audio.startTime);
-        if ((player.position - targetPos).abs() > const Duration(milliseconds: 100)) {
+
+        if ((player.position - targetPos).abs() > const Duration(milliseconds: 200)) {
           await player.seek(targetPos);
         }
-        if (isPlaying) {
+
+        if (!player.playing) {
           await player.play();
-        } else {
-          await player.pause();
         }
       } else {
-        await player.pause();
+        if (player.playing) {
+          await player.pause();
+        }
       }
     }
   }
@@ -578,7 +607,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return null;
   }
 
-  // --------------------------------------------------------------------- Real-time split / trim / selection
   void splitClipAtPlayhead() {
     final clip = getClipAtPlayhead();
     if (clip == null) return;
@@ -608,7 +636,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     _updatePreview();
   }
 
-  // 5. Add autosave function
   Future<void> _performAutosave() async {
     final success = await CloudSaveService.saveProject(
       projectId: currentProjectId,
@@ -625,7 +652,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
-  // 6. Add manual save
   Future<void> _saveProject() async {
     _showLoading();
     final success = await CloudSaveService.saveProject(
@@ -677,6 +703,47 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       _showError('Export failed');
     }
   }
+
+  // NEW: Check if playhead is at clip boundary
+  bool _isAtClipBoundary(TimelineItem clip) {
+    const tolerance = Duration(milliseconds: 200);
+    final diff = (playheadNotifier.value - clip.startTime).abs();
+    final diffEnd = (playheadNotifier.value - (clip.startTime + clip.duration)).abs();
+    return diff < tolerance || diffEnd < tolerance;
+  }
+
+  // NEW: Enter Trim Mode
+  void _enterTrimMode(TimelineItem clip) {
+    const tolerance = Duration(milliseconds: 200);
+    final atStart = (playheadNotifier.value - clip.startTime).abs() < tolerance;
+
+    setState(() {
+      _isTrimMode = true;
+      _trimClipId = clip.id;
+      _trimAtStart = atStart;
+      _trimFixedPosition = playheadNotifier.value;
+      _selection.select(clip.id, clip.type);
+      _activeItem = clip;
+    });
+
+    _showMessage(_trimAtStart ? '✂️ Trim Start (drag left handle)' : '✂️ Trim End (drag right handle)');
+    debugPrint('🎬 Entered Trim Mode: ${_trimAtStart ? "START" : "END"} of clip ${clip.id}');
+  }
+
+  // NEW: Exit Trim Mode
+  void _exitTrimMode() {
+    if (_isTrimMode) {
+      _saveToHistory();
+      setState(() {
+        _isTrimMode = false;
+        _trimClipId = null;
+        _trimAtStart = false;
+      });
+      _showMessage('✅ Trim complete');
+      debugPrint('🎬 Exited Trim Mode');
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -1410,11 +1477,21 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     );
   }
 
+  // FIX 9: ENHANCED OPEN NAV MODE - PRESERVES TIMELINE POSITION
   void _openNavMode(BottomNavMode mode) {
+    // Exit trim mode if active
+    if (_isTrimMode) {
+      _exitTrimMode();
+    }
+
+    if (_timelineScrollController.hasClients) {
+      _lastTimelineScrollPosition = _timelineScrollController.offset;
+    }
+
     setState(() {
       _currentNavMode = mode;
+      _isReturningFromToolPanel = false;
 
-      // Switch timeline display mode based on bottom nav selection
       switch (mode) {
         case BottomNavMode.text:
           _timelineDisplayMode = TimelineDisplayMode.videoTextOnly;
@@ -1646,8 +1723,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return null;
   }
 
+  // ENHANCED: _buildVideoClip with Trim Mode support
   Widget _buildVideoClip(TimelineItem item, double centerX) {
     final isSelected = _selection.clipId == item.id;
+    final isTrimming = _isTrimMode && _trimClipId == item.id;
     final startX = item.startTime.inSeconds * pixelsPerSecond - timelineOffset;
     final width = math.max(
       item.duration.inSeconds * pixelsPerSecond / item.speed,
@@ -1658,18 +1737,30 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       left: startX + centerX,
       child: GestureDetector(
         onTap: () async {
+          // FIX: Check if playhead is at boundary for Trim Mode
+          if (_isAtClipBoundary(item)) {
+            _enterTrimMode(item);
+            return;
+          }
+
+          // Normal selection
           setState(() {
             _selection.select(item.id, item.type);
             _activeItem = item;
-            playheadPosition = item.startTime;
+            playheadNotifier.value = item.startTime; // FIX: Set playhead to clip start
           });
 
-          // Switch with proper delay to prevent crackling
+          // FIX: Switch and ensure frame is visible
           await _switchToClip(item);
-          await Future.delayed(const Duration(milliseconds: 50));
+          await Future.delayed(const Duration(milliseconds: 100));
           _updatePreview();
         },
         onHorizontalDragStart: (d) {
+          if (isTrimming) {
+            // In trim mode, just track the drag
+            return;
+          }
+
           final localX = d.localPosition.dx;
           if (localX < 24) {
             _isResizingClip = true;
@@ -1682,6 +1773,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
           }
         },
         onHorizontalDragUpdate: (d) {
+          if (isTrimming) {
+            // NEW: Handle trim dragging
+            _handleTrimDrag(item, d.delta.dx);
+            return;
+          }
+
           if (_isResizingClip && _resizingClipId == item.id) {
             final deltaSec = Duration(
               milliseconds: (d.delta.dx / pixelsPerSecond * 1000).round(),
@@ -1714,6 +1811,11 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
           }
         },
         onHorizontalDragEnd: (_) {
+          if (isTrimming) {
+            _exitTrimMode();
+            return;
+          }
+
           _isResizingClip = false;
           _resizingClipId = null;
           _saveToHistory();
@@ -1724,10 +1826,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
           decoration: BoxDecoration(
             color: Colors.grey[850],
             borderRadius: BorderRadius.circular(8),
-            border:
-            isSelected
-                ? Border.all(color: const Color(0xFF00D9FF), width: 3)
-                : null,
+            border: Border.all(
+              color: isTrimming
+                  ? Colors.orange
+                  : (isSelected ? const Color(0xFF00D9FF) : Colors.transparent),
+              width: isTrimming ? 4 : (isSelected ? 3 : 0),
+            ),
           ),
           child: Stack(
             children: [
@@ -1735,7 +1839,91 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                 borderRadius: BorderRadius.circular(8),
                 child: _buildThumbnailStrip(item, width),
               ),
-              if (width > 80) ...[
+
+              // NEW: Trim Mode handles
+              if (isTrimming) ...[
+                // Left trim handle
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Container(
+                    width: 8,
+                    decoration: BoxDecoration(
+                      color: _trimAtStart ? Colors.orange : Colors.white,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.5),
+                          blurRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: _trimAtStart
+                        ? const Center(
+                      child: Icon(
+                        Icons.drag_handle,
+                        color: Colors.white,
+                        size: 12,
+                      ),
+                    )
+                        : null,
+                  ),
+                ),
+                // Right trim handle
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Container(
+                    width: 8,
+                    decoration: BoxDecoration(
+                      color: !_trimAtStart ? Colors.orange : Colors.white,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.5),
+                          blurRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: !_trimAtStart
+                        ? const Center(
+                      child: Icon(
+                        Icons.drag_handle,
+                        color: Colors.white,
+                        size: 12,
+                      ),
+                    )
+                        : null,
+                  ),
+                ),
+                // Trim indicator
+                Positioned(
+                  top: 4,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.orange,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        _trimAtStart ? 'TRIM START' : 'TRIM END',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 8,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ] else if (width > 80) ...[
+                // Normal handles when not in trim mode
                 Positioned(
                   left: 0,
                   top: 0,
@@ -1749,6 +1937,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                   child: Container(width: 6, color: Colors.white),
                 ),
               ],
+
               Positioned(
                 bottom: 2,
                 left: 0,
@@ -1768,6 +1957,44 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         ),
       ),
     );
+  }
+
+  // NEW: Handle trim dragging
+  void _handleTrimDrag(TimelineItem item, double deltaX) {
+    final deltaSec = Duration(
+      milliseconds: (deltaX / pixelsPerSecond * 1000).round(),
+    );
+
+    setState(() {
+      if (_trimAtStart) {
+        // Trimming from start
+        final newStart = item.startTime + deltaSec;
+        final newTrimStart = item.trimStart + deltaSec;
+        final newDur = item.duration - deltaSec;
+
+        // Validate
+        if (newDur > const Duration(milliseconds: 500) &&
+            newTrimStart >= Duration.zero &&
+            newTrimStart < item.originalDuration) {
+          item.startTime = newStart;
+          item.trimStart = newTrimStart;
+          item.duration = newDur;
+        }
+      } else {
+        // Trimming from end
+        final newDur = item.duration + deltaSec;
+        final newTrimEnd = item.trimStart + newDur;
+
+        // Validate
+        if (newDur > const Duration(milliseconds: 500) &&
+            newTrimEnd <= item.originalDuration) {
+          item.duration = newDur;
+          item.trimEnd = newTrimEnd;
+        }
+      }
+    });
+
+    _updatePreview();
   }
 
   Widget _buildAudioClip(TimelineItem item, double centerX) {
@@ -2658,13 +2885,19 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         _timelineDisplayMode == TimelineDisplayMode.videoOverlayOnly;
   }
 
-  // 11. ADDITIONAL: Tap timeline to seek
+  // FIX 10: ENHANCED TIMELINE TAP - PREVENTS UNWANTED JUMPS
   void _onTimelineTap(TapDownDetails details) {
+    _isEditingTimeline = true;
+
+    // Exit trim mode if active
+    if (_isTrimMode) {
+      _exitTrimMode();
+    }
+
     final screenWidth = MediaQuery.of(context).size.width;
     final centerX = screenWidth / 2;
     final tapX = details.localPosition.dx;
 
-    // Calculate time from tap position
     final tapTimeSeconds = (timelineOffset + tapX - centerX) / pixelsPerSecond;
     final newPosition = Duration(
       milliseconds: (tapTimeSeconds * 1000).round(),
@@ -2675,8 +2908,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
     setState(() {
       playheadPosition = newPosition;
+      playheadNotifier.value = newPosition;
 
-      // Update timeline scroll
       if (_timelineScrollController.hasClients) {
         final targetOffset = (newPosition.inMilliseconds / 1000 * pixelsPerSecond) - centerX;
         _timelineScrollController.jumpTo(
@@ -2685,11 +2918,17 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
             _timelineScrollController.position.maxScrollExtent,
           ),
         );
+        _lastTimelineScrollPosition = _timelineScrollController.offset;
       }
     });
 
-    // Update preview
     _updatePreview();
+
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (mounted) {
+        _isEditingTimeline = false;
+      }
+    });
   }
 
   Widget _buildVideoTrack() {
@@ -2764,16 +3003,15 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final thumbCount = item.thumbnailBytes!.length;
     final thumbWidth = 120.0;
 
-    // We want smooth repeating thumbnails
-    return ClipRRect(  // Prevents any overflow from showing
+    return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: SizedBox(
         width: clipWidth,
         height: 60,
         child: ListView.builder(
           scrollDirection: Axis.horizontal,
-          physics: const NeverScrollableScrollPhysics(), // No user scroll
-          itemCount: (clipWidth / thumbWidth).ceil() + 5, // +5 for safety
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: (clipWidth / thumbWidth).ceil() + 5,
           itemBuilder: (context, index) {
             final thumbIndex = index % thumbCount;
             final bytes = item.thumbnailBytes![thumbIndex];
@@ -3361,7 +3599,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     _showMessage('Deleted');
   }
 
-
 // 8. FIXED: Add video with immediate preview
   Future<void> _addVideo() async {
     final XFile? file = await _picker.pickVideo(source: ImageSource.gallery);
@@ -3374,18 +3611,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       final controller = VideoPlayerController.file(File(videoPath));
 
       await controller.initialize();
-
-      // Simple frame display
       await controller.seekTo(const Duration(milliseconds: 50));
       await Future.delayed(const Duration(milliseconds: 100));
       await controller.seekTo(Duration.zero);
 
       final duration = controller.value.duration;
 
-      List<Uint8List> bytesList = await _generateRobustThumbnails(
-        videoPath,
-        duration,
-      );
+      List<Uint8List> bytesList = await _generateRobustThumbnails(videoPath, duration);
 
       if (bytesList.isEmpty) {
         bytesList = await _generateFallbackThumbnails(videoPath, duration);
@@ -3423,22 +3655,18 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         _activeItem = item;
         _activeVideoController = controller;
         playheadPosition = startTime;
+        playheadNotifier.value = startTime;
       });
 
-      // Initialize settings
       await controller.setVolume(item.volume);
       await controller.setPlaybackSpeed(item.speed.clamp(0.25, 2.0));
 
       if (_timelineScrollController.hasClients) {
-        final targetOffset =
-            (startTime.inMilliseconds / 1000 * pixelsPerSecond) -
-                (MediaQuery.of(context).size.width / 2);
+        final targetOffset = (startTime.inMilliseconds / 1000 * pixelsPerSecond) -
+            (MediaQuery.of(context).size.width / 2);
 
         _timelineScrollController.animateTo(
-          targetOffset.clamp(
-            0.0,
-            _timelineScrollController.position.maxScrollExtent,
-          ),
+          targetOffset.clamp(0.0, _timelineScrollController.position.maxScrollExtent),
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         );
@@ -3454,37 +3682,54 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
+  // FIX 8: FIXED ADD AUDIO - NOW APPENDS INSTEAD OF REPLACING
   Future<void> _addAudio() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.audio,
-      allowMultiple: false,
-    );
-
-    if (result == null || result.files.isEmpty || result.files.first.path == null) return;
-
-    final path = result.files.first.path!;
-    final fileName = result.files.first.name;
-
-    _showLoading();
+    var status = await Permission.audio.request();
+    if (status.isDenied || status.isPermanentlyDenied) {
+      _showMessage("Storage permission required to pick audio");
+      if (status.isPermanentlyDenied) openAppSettings();
+      return;
+    }
 
     try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac', 'opus'],
+        withData: false,
+        allowMultiple: false,
+      );
+
+      if (result == null || result.files.isEmpty) {
+        debugPrint("Audio selection cancelled");
+        return;
+      }
+
+      final file = result.files.first;
+      final String? path = file.path;
+
+      if (path == null || path.isEmpty) {
+        _showError("Could not access the selected audio file");
+        return;
+      }
+
+      _showLoading();
+
       final player = AudioPlayer();
-      await player.setFilePath(path); // This never crashes
+      await player.setFilePath(path);
 
       final duration = player.duration ?? const Duration(seconds: 10);
-
-      final waveform = List.generate(200, (_) => 0.2 + math.Random().nextDouble() * 0.6);
+      final waveform = List.generate(120, (_) => 0.1 + math.Random().nextDouble() * 0.8);
 
       final item = TimelineItem(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         type: TimelineItemType.audio,
         file: File(path),
-        startTime: playheadPosition,
+        startTime: playheadNotifier.value,
         duration: duration,
         originalDuration: duration,
         waveformData: waveform,
         volume: 1.0,
-        text: fileName,
+        text: file.name,
       );
 
       _audioPlayers[item.id] = player;
@@ -3496,10 +3741,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       });
 
       _hideLoading();
-      _showMessage('Audio added: $fileName');
-    } catch (e) {
+      _showMessage("Audio added: ${file.name}");
+
+    } catch (e, s) {
+      debugPrint("Audio picker crash: $e\n$s");
       _hideLoading();
-      _showError('Failed to load audio');
+      _showError("Failed to add audio: $e");
     }
   }
 
@@ -3508,7 +3755,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     return List.generate(200, (_) => random.nextDouble() * 0.8 + 0.1);
   }
 
-// 9. ENHANCED _addImage to generate thumbnails:
+  // FIX 7: FIXED ADD IMAGE - NOW APPENDS INSTEAD OF REPLACING
   Future<void> _addImage() async {
     final XFile? file = await _picker.pickImage(source: ImageSource.gallery);
     if (file == null) return;
@@ -3522,25 +3769,29 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         imageDur = activeVideo.duration;
       }
 
-      // Read image bytes for timeline thumbnail
       final imageFile = File(file.path);
       final bytes = await imageFile.readAsBytes();
 
       final screenSize = MediaQuery.of(context).size;
 
+      final existingOverlayCount = overlayItems.where((item) {
+        return playheadNotifier.value >= item.startTime &&
+            playheadNotifier.value < item.startTime + item.duration;
+      }).length;
+
       final item = TimelineItem(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         type: TimelineItemType.image,
         file: imageFile,
-        startTime: playheadPosition,
+        startTime: playheadNotifier.value,
         duration: imageDur,
         originalDuration: imageDur,
-        x: screenSize.width / 2 - 100,
-        y: screenSize.height / 2 - 100,
+        x: screenSize.width / 2 - 100 + (existingOverlayCount * 30.0),
+        y: screenSize.height / 2 - 100 + (existingOverlayCount * 30.0),
         scale: 1.0,
         rotation: 0.0,
         layerIndex: _nextLayerIndex++,
-        thumbnailBytes: [bytes], // Store for timeline display
+        thumbnailBytes: [bytes],
       );
 
       _saveToHistory();
@@ -3550,9 +3801,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
         overlayItems.sort((a, b) => a.startTime.compareTo(b.startTime));
         selectedClipId = item.id;
         _selection.select(item.id, item.type);
-
-        // Force update
-        playheadPosition = item.startTime;
       });
 
       _hideLoading();
@@ -3565,20 +3813,26 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     }
   }
 
+  // FIX 6: FIXED ADD TEXT - NOW APPENDS INSTEAD OF REPLACING
   void _addText() {
     _saveToHistory();
 
     final screenSize = MediaQuery.of(context).size;
 
+    final existingTextCount = textItems.where((item) {
+      return playheadNotifier.value >= item.startTime &&
+          playheadNotifier.value < item.startTime + item.duration;
+    }).length;
+
     final item = TimelineItem(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       type: TimelineItemType.text,
-      text: "New Text",
-      startTime: playheadPosition,
+      text: "New Text ${existingTextCount + 1}",
+      startTime: playheadNotifier.value,
       duration: const Duration(seconds: 5),
       originalDuration: const Duration(seconds: 5),
       x: 100,
-      y: 200,
+      y: 150 + (existingTextCount * 70.0),
       textColor: Colors.white,
       fontSize: 36,
       scale: 1.0,
@@ -3594,8 +3848,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     });
 
     debugPrint('✅ Text added: ${item.id} at ${item.startTime}');
-
-    // Show text bottom sheet with templates/fonts/animation
+    _showMessage('Text added - Drag to reposition');
     _showTextBottomSheet(item);
   }
 
@@ -4137,25 +4390,46 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     );
   }
 
+  // FIX 11: ENHANCED BOTTOM NAV WITH BACK BUTTON - RESTORES POSITION
   Widget _buildBottomNavWithBackButton() {
     return Container(
       height: 80,
       color: Colors.black,
       child: Row(
         children: [
-          // Back button (shown when in special mode)
+          // FIX: Back button restores timeline position
           if (_showBackButton)
             IconButton(
               icon: Icon(
-                Icons.keyboard_arrow_down,
+                Icons.keyboard_arrow_left,
                 color: Colors.white,
                 size: 28,
               ),
               onPressed: () {
                 setState(() {
+                  _isReturningFromToolPanel = true; // FIX: Set flag
                   _currentNavMode = BottomNavMode.normal;
                   _timelineDisplayMode = TimelineDisplayMode.allTracks;
                   _showBackButton = false;
+                });
+
+                // FIX: Restore timeline scroll position after frame renders
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (_timelineScrollController.hasClients) {
+                    _timelineScrollController.jumpTo(
+                      _lastTimelineScrollPosition.clamp(
+                        0.0,
+                        _timelineScrollController.position.maxScrollExtent,
+                      ),
+                    );
+                  }
+
+                  // Reset flag after delay
+                  Future.delayed(const Duration(milliseconds: 300), () {
+                    if (mounted) {
+                      setState(() => _isReturningFromToolPanel = false);
+                    }
+                  });
                 });
               },
             ),
@@ -4165,46 +4439,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  _navButton(
-                    Icons.edit,
-                    'Edit',
-                        () => _openNavMode(BottomNavMode.edit),
-                  ),
-                  _navButton(
-                    Icons.audiotrack,
-                    'Audio',
-                        () => _openNavMode(BottomNavMode.audio),
-                  ),
-                  _navButton(
-                    Icons.text_fields,
-                    'Text',
-                        () => _openNavMode(BottomNavMode.text),
-                  ),
-                  _navButton(
-                    Icons.emoji_emotions,
-                    'Stickers',
-                        () => _openNavMode(BottomNavMode.stickers),
-                  ),
-                  _navButton(
-                    Icons.layers,
-                    'Overlay',
-                        () => _openNavMode(BottomNavMode.overlay),
-                  ),
-                  _navButton(
-                    Icons.auto_awesome,
-                    'Effects',
-                        () => _openNavMode(BottomNavMode.effects),
-                  ),
-                  _navButton(
-                    Icons.filter,
-                    'Filters',
-                        () => _openNavMode(BottomNavMode.filters),
-                  ),
-                  _navButton(
-                    Icons.animation,
-                    'Animation',
-                        () => _openNavMode(BottomNavMode.animation),
-                  ),
+                  _navButton(Icons.edit, 'Edit', () => _openNavMode(BottomNavMode.edit)),
+                  _navButton(Icons.audiotrack, 'Audio', () => _openNavMode(BottomNavMode.audio)),
+                  _navButton(Icons.text_fields, 'Text', () => _openNavMode(BottomNavMode.text)),
+                  _navButton(Icons.emoji_emotions, 'Stickers', () => _openNavMode(BottomNavMode.stickers)),
+                  _navButton(Icons.layers, 'Overlay', () => _openNavMode(BottomNavMode.overlay)),
+                  _navButton(Icons.auto_awesome, 'Effects', () => _openNavMode(BottomNavMode.effects)),
+                  _navButton(Icons.filter, 'Filters', () => _openNavMode(BottomNavMode.filters)),
+                  _navButton(Icons.animation, 'Animation', () => _openNavMode(BottomNavMode.animation)),
                 ],
               ),
             ),
@@ -4213,6 +4455,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       ),
     );
   }
+
 
   Widget _animationTile(String title, VoidCallback onTap) {
     return ListTile(

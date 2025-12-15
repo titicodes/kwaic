@@ -1,4 +1,3 @@
-// model/keyframe.dart
 class Keyframe {
   final double time; // 0.0 to 1.0
   final double? x;
@@ -42,6 +41,28 @@ class Keyframe {
       scale: scale == null || other.scale == null ? null : scale! + (other.scale! - scale!) * t,
       rotation: rotation == null || other.rotation == null ? null : rotation! + (other.rotation! - rotation!) * t,
       opacity: opacity == null || other.opacity == null ? null : opacity! + (other.opacity! - opacity!) * t,
+    );
+  }
+
+  // Convert a Keyframe to JSON
+  Map<String, dynamic> toJson() => {
+    'time': time,
+    'x': x,
+    'y': y,
+    'scale': scale,
+    'rotation': rotation,
+    'opacity': opacity,
+  };
+
+  // Create a Keyframe from JSON
+  factory Keyframe.fromJson(Map<String, dynamic> json) {
+    return Keyframe(
+      time: (json['time'] as num).toDouble(),
+      x: (json['x'] as num?)?.toDouble(),
+      y: (json['y'] as num?)?.toDouble(),
+      scale: (json['scale'] as num?)?.toDouble(),
+      rotation: (json['rotation'] as num?)?.toDouble(),
+      opacity: (json['opacity'] as num?)?.toDouble(),
     );
   }
 }

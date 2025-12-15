@@ -1,47 +1,77 @@
-import 'package:video_player/video_player.dart';
+// servuices/audio_video_sync.dart
 
+import 'package:flutter/foundation.dart';
+import 'package:just_audio/just_audio.dart';
 import '../model/timeline_item.dart';
 
 class AudioVideoSync {
-  final Map<String, VideoPlayerController> audioControllers;
-  final List<TimelineItem> audioItems;
+  final Map<String, AudioPlayer> _audioPlayers = {};
 
-  AudioVideoSync(this.audioControllers, this.audioItems);
+  // Pass the audio items and their players (you'll populate this from your editor)
+  AudioVideoSync(Map<String, AudioPlayer> audioPlayers) {
+    _audioPlayers.addAll(audioPlayers);
+  }
 
-  Future<void> syncAtPosition(Duration position) async {
+  /// Plays only the audio tracks that are active at the current playhead position
+  Future<void> playAudioTracks({
+    required List<TimelineItem> audioItems,
+    required ValueNotifier<Duration> playhead,
+    required bool isPlaying,
+  }) async {
+    if (!isPlaying) return;
+
+    final currentPos = playhead.value;
+
     for (final audio in audioItems) {
-      if (position >= audio.startTime &&
-          position < audio.startTime + audio.duration) {
-        final ctrl = audioControllers[audio.id];
-        if (ctrl != null && ctrl.value.isInitialized) {
-          final localPos = position - audio.startTime;
-          final sourcePos = audio.trimStart + localPos;
+      final player = _audioPlayers[audio.id];
+      if (player == null) continue;
 
-          // Sync audio playback
-          if ((ctrl.value.position - sourcePos).abs() >
-              const Duration(milliseconds: 100)) {
-            await ctrl.seekTo(sourcePos);
+      final inRange = currentPos >= audio.startTime &&
+          currentPos < audio.startTime + audio.duration;
+
+      if (inRange) {
+        final targetPos = audio.trimStart + (currentPos - audio.startTime);
+
+        // Seek if too far off (prevents drift)
+        if ((player.position - targetPos).abs() > const Duration(milliseconds: 180)) {
+          try {
+            await player.seek(targetPos);
+          } catch (e) {
+            debugPrint("Audio seek failed: $e");
           }
+        }
 
-          await ctrl.setVolume(audio.volume);
+        // Set volume
+        await player.setVolume(audio.volume);
+
+        // Play if not already playing
+        if (!player.playing) {
+          await player.play();
+        }
+      } else {
+        // Stop audio that's outside the active range
+        if (player.playing) {
+          await player.pause();
         }
       }
     }
   }
 
-  Future<void> play() async {
-    for (final ctrl in audioControllers.values) {
-      if (ctrl.value.isInitialized) {
-        await ctrl.play();
+  /// Pause all audio players
+  Future<void> pauseAllAudio() async {
+    for (final player in _audioPlayers.values) {
+      if (player.playing) {
+        await player.pause();
       }
     }
   }
 
-  Future<void> pause() async {
-    for (final ctrl in audioControllers.values) {
-      if (ctrl.value.isInitialized) {
-        await ctrl.pause();
-      }
+  /// Optional: Stop + dispose all players when editor closes
+  Future<void> dispose() async {
+    for (final player in _audioPlayers.values) {
+      await player.pause();
+      await player.dispose();
     }
+    _audioPlayers.clear();
   }
 }

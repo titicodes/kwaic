@@ -1141,6 +1141,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openProject(Map<String, dynamic> project) async {
     try {
       _showLoadingDialog();
+
+      // Load the project data
       final projectData = await CloudSaveService.loadProject(project['id']);
 
       if (projectData == null || !mounted) {
@@ -1149,16 +1151,33 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      final clips = (projectData['clips'] as List)
-          .map((json) => TimelineItem.fromJson(json))
-          .toList();
+      // Log project data for debugging purposes
+      print('Project Data: $projectData');
 
+      // Safely process 'clips' field
+      List<TimelineItem> clips = [];
+      if (projectData['clips'] is List) {
+        // Process the clips as a List of dynamic objects
+        clips = (projectData['clips'] as List<dynamic>)
+            .map((json) => TimelineItem.fromJson(json as Map<String, dynamic>))
+            .toList();
+      } else if (projectData['clips'] is String) {
+        // Handle the case where 'clips' is a string (e.g., it might be a URL or serialized data)
+        print('clips is a string: ${projectData['clips']}');
+      } else {
+        // Handle unexpected type
+        _showError('Unexpected type for clips');
+        return;
+      }
+
+      // Ensure clips is not empty before proceeding
       if (clips.isEmpty) {
         Navigator.pop(context);
         _showError('Project has no video clips');
         return;
       }
 
+      // Filter out clips with a valid file and create XFile objects
       final videoFiles = clips
           .where((c) => c.file != null)
           .map((c) => XFile(c.file!.path))
@@ -1766,12 +1785,12 @@ class AllProjectsScreen extends StatelessWidget {
   final Function(Map<String, dynamic>) onProjectRename;
 
   const AllProjectsScreen({
-    Key? key,
+    super.key,
     required this.projects,
     required this.onProjectTap,
     required this.onProjectDelete,
     required this.onProjectRename,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

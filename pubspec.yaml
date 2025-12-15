@@ -20,7 +20,7 @@ dependencies:
   flutter_sound: ^9.28.0
   path_provider: ^2.1.5
   permission_handler: ^12.0.1
-  uuid: ^4.5.1
+  uuid: ^4.5.2
   image_picker: ^1.2.0
   audioplayers: ^6.5.1
   record: ^6.1.2
@@ -44,11 +44,20 @@ dependencies:
   lottie: ^3.3.1
   shared_preferences: ^2.5.3
   just_audio: ^0.10.5
+  extended_image: ^10.0.1
+  just_waveform: ^0.0.7
+  audio_service: ^0.18.18
+  on_audio_query: ^2.9.0
+  flutter_svg: ^2.2.2
+  animated_text_kit: ^4.3.0
+  google_fonts: ^6.3.2
+  flutter_animate: ^4.5.2
+  fl_chart: ^0.68.0
 
 
-  #flutter_gpu_video_filters: ^0.0.20
-  #native_filters: ^0.0.15+alpha
-  #ffmpeg_kit_flutter: ^5.1.0
+dependency_overrides:
+  # Force an older, compatible version of vector_math
+  vector_math: 2.1.3
 
 dev_dependencies:
   flutter_test:

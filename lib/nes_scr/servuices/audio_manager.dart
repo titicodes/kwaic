@@ -44,7 +44,7 @@ class AudioManager extends ChangeNotifier {
         final targetPos = audio.trimStart + (playheadPosition - audio.startTime);
 
         // Sync position if drift is significant
-        if ((player.position - targetPos).abs() > const Duration(milliseconds: 200)) {
+        if ((player.position - targetPos).abs() > const Duration(milliseconds: 350)) {
           await player.seek(targetPos);
         }
 
@@ -71,6 +71,14 @@ class AudioManager extends ChangeNotifier {
       }
     }
     notifyListeners();
+  }
+
+  Future<void> pauseDuringScrub() async {
+    for (final player in _players.values) {
+      if (player.playing) {
+        await player.pause();
+      }
+    }
   }
 
   /// Stop all audio players

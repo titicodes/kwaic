@@ -39,23 +39,6 @@ class TopBar extends StatelessWidget {
 
           const Spacer(),
 
-          // Project Name (centered)
-          Expanded(
-            flex: 3,
-            child: Center(
-              child: Text(
-                projectName,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 17,
-                  fontWeight: FontWeight.w600,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-
           const Spacer(),
 
           // Help button

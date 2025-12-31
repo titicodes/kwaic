@@ -169,6 +169,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  chewie:
+    dependency: "direct main"
+    description:
+      name: chewie
+      sha256: "19b93a1e60e4ba640a792208a6543f1c7d5b124d011ce0199e2f18802199d984"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.12.1"
   cli_config:
     dependency: transitive
     description:
@@ -273,6 +281,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.4.1"
+  easy_video_editor:
+    dependency: "direct main"
+    description:
+      name: easy_video_editor
+      sha256: "5ae6c32a89cd5839da156236ce8ed3f9d8c295f402668c14afc1bd11e765905c"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.3"
   equatable:
     dependency: "direct main"
     description:
@@ -438,14 +454,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.0.0"
-  flutter_native_video_trimmer:
-    dependency: transitive
-    description:
-      name: flutter_native_video_trimmer
-      sha256: d31159c34fb4e56fe53919b5b9978f75b5fb4b2934ceb05c6b369929139d3b72
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.9"
   flutter_plugin_android_lifecycle:
     dependency: transitive
     description:
@@ -532,10 +540,10 @@ packages:
     dependency: transitive
     description:
       name: get_thumbnail_video
-      sha256: ff61495b42051765d2a9e93bd14dac7ede5853033837bde71c27575a192c53fc
+      sha256: "22058c1055dbcdcbaee4f80d52197deeb83fd04ae78839e9a656a5bfb58ed95a"
       url: "https://pub.dev"
     source: hosted
-    version: "0.7.3"
+    version: "0.6.1"
   glob:
     dependency: transitive
     description:
@@ -561,7 +569,7 @@ packages:
     source: hosted
     version: "0.15.6"
   http:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: http
       sha256: "87721a4a50b19c7f1d49001e51409bddc46303966ce89a65af4f4e6004896412"
@@ -600,14 +608,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.2"
-  image:
-    dependency: transitive
-    description:
-      name: image
-      sha256: "51555e36056541237b15b57afc31a0f53d4f9aefd9bd00873a6dc0090e54e332"
-      url: "https://pub.dev"
-    source: hosted
-    version: "4.6.0"
   image_picker:
     dependency: "direct main"
     description:
@@ -672,14 +672,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.2.2"
-  intl:
-    dependency: transitive
-    description:
-      name: intl
-      sha256: "3df61194eb431efc39c4ceba583b95633a403f46c9fd341e550ce0bfa50e9aa5"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.20.2"
   io:
     dependency: transitive
     description:
@@ -800,6 +792,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.11.1"
+  media_store_plus:
+    dependency: "direct main"
+    description:
+      name: media_store_plus
+      sha256: "4b4971365e00a4ed9fde14abf40d7c27475b66b8bba9bf43478ae2ecb449df20"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.3"
   meta:
     dependency: transitive
     description:
@@ -840,22 +840,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.0.2"
-  on_audio_query:
-    dependency: "direct main"
-    description:
-      name: on_audio_query
-      sha256: "28d7a247f8a0580b5d1befba15c8d8fd7e1cf3cd8e0449d54a66fc2ef27adf10"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.9.0"
-  on_audio_query_android:
-    dependency: transitive
-    description:
-      name: on_audio_query_android
-      sha256: c0b946011ee7aa8ec76b21837f0cb0007120ac291202ed6c6fb4c498ba2ff6fe
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.0"
   on_audio_query_ios:
     dependency: transitive
     description:
@@ -872,6 +856,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.7.0"
+  on_audio_query_plus_android:
+    dependency: transitive
+    description:
+      name: on_audio_query_plus_android
+      sha256: "30ff80db9d8cbd5c3b4869bc36ff2e60ce2724d4ee19a90fa7e47ade2ab34224"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.2"
+  on_audio_query_pluse:
+    dependency: "direct main"
+    description:
+      name: on_audio_query_pluse
+      sha256: d09428040e9028d1add221bfc3e53e66872c0a00117161c90f182ed6aacf731c
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.6"
   on_audio_query_web:
     dependency: transitive
     description:
@@ -888,6 +888,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.0"
+  package_info_plus:
+    dependency: transitive
+    description:
+      name: package_info_plus
+      sha256: f69da0d3189a4b4ceaeb1a3defb0f329b3b352517f52bed4290f83d4f06bc08d
+      url: "https://pub.dev"
+    source: hosted
+    version: "9.0.0"
+  package_info_plus_platform_interface:
+    dependency: transitive
+    description:
+      name: package_info_plus_platform_interface
+      sha256: "202a487f08836a592a6bd4f901ac69b3a8f146af552bbd14407b6b41e1c3f086"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.2.1"
   path:
     dependency: transitive
     description:
@@ -1008,6 +1024,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "6.1.0"
+  photo_manager:
+    dependency: "direct main"
+    description:
+      name: photo_manager
+      sha256: "807688e3221e90fb02a4466746edd9cb9a0de025f8754c819f96604c00f6f1f5"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.8.3"
   platform:
     dependency: transitive
     description:
@@ -1429,6 +1453,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.0.0"
+  video_editor_2:
+    dependency: "direct main"
+    description:
+      name: video_editor_2
+      sha256: "3ca2295784c106ac35bec5db3a65de0ac26d442491a9583c978d42a91bc513c7"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.1"
   video_player:
     dependency: "direct main"
     description:
@@ -1477,14 +1509,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.5.6"
-  video_trimmer:
-    dependency: "direct main"
-    description:
-      name: video_trimmer
-      sha256: a7e24512ec6bf47c99e3e192264a1c19a2b30e21d92add1b43ecd0995659a0b4
-      url: "https://pub.dev"
-    source: hosted
-    version: "5.0.0"
   vm_service:
     dependency: transitive
     description:
@@ -1493,6 +1517,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "14.3.1"
+  wakelock_plus:
+    dependency: transitive
+    description:
+      name: wakelock_plus
+      sha256: "9296d40c9adbedaba95d1e704f4e0b434be446e2792948d0e4aa977048104228"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.4.0"
+  wakelock_plus_platform_interface:
+    dependency: transitive
+    description:
+      name: wakelock_plus_platform_interface
+      sha256: "036deb14cd62f558ca3b73006d52ce049fabcdcb2eddfe0bf0fe4e8a943b5cf2"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.3.0"
   watcher:
     dependency: transitive
     description:

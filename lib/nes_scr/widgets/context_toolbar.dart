@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-
 import '../model/timeline_item.dart';
 
 class ContextToolbar extends StatelessWidget {
@@ -10,7 +9,7 @@ class ContextToolbar extends StatelessWidget {
   final VoidCallback? onRecord;
   final VoidCallback? onTextToAudio;
   final VoidCallback? onExtract;
-  final VoidCallback? onAddText; // ← ADD THESE
+  final VoidCallback? onAddText;
   final VoidCallback? onAutoCaption;
   final VoidCallback? onStickers;
   final Function(String)? onApplyFilter;
@@ -25,6 +24,9 @@ class ContextToolbar extends StatelessWidget {
   final VoidCallback? onDuplicate;
   final VoidCallback? onReplace;
   final VoidCallback? onAdjust;
+  final VoidCallback? onBackgroundMusic;
+  final VoidCallback? onBackground;
+  final VoidCallback? onAddOverlay;
 
   const ContextToolbar({
     super.key,
@@ -35,7 +37,7 @@ class ContextToolbar extends StatelessWidget {
     this.onRecord,
     this.onTextToAudio,
     this.onExtract,
-    this.onAddText, // ← ADD
+    this.onAddText,
     this.onAutoCaption,
     this.onStickers,
     this.onApplyFilter,
@@ -50,6 +52,8 @@ class ContextToolbar extends StatelessWidget {
     this.onDuplicate,
     this.onReplace,
     this.onAdjust,
+    this.onBackgroundMusic,
+    this.onBackground, this.onAddOverlay,
   });
 
   @override
@@ -64,13 +68,13 @@ class ContextToolbar extends StatelessWidget {
         _tool('Volume', Icons.volume_up, onVolume),
         _tool('Animation', Icons.auto_awesome, onAnimation),
         _tool('Effect', Icons.filter_vintage, onEffect),
-        _tool('Delete', Icons.delete, onDelete, color: Colors.red),
         _tool('Speed', Icons.speed, onSpeed),
-        _tool('Beats', Icons.music_note, onBeats),
         _tool('Crop', Icons.crop, onCrop),
         _tool('Duplicate', Icons.copy, onDuplicate),
         _tool('Replace', Icons.swap_horiz, onReplace),
         _tool('Adjust', Icons.tune, onAdjust),
+        _tool('Overlay', Icons.format_overline, onAddOverlay),
+        _tool('Delete', Icons.delete, onDelete, color: Colors.red),
       ]);
     } else if (mode == BottomNavMode.audio) {
       tools.addAll([
@@ -82,36 +86,28 @@ class ContextToolbar extends StatelessWidget {
       ]);
     } else if (mode == BottomNavMode.text) {
       tools.addAll([
-        _tool(
-          'Add Text',
-          Icons.text_increase,
-          onAddText,
-        ), // ← Now passed correctly
+        _tool('Add Text', Icons.text_fields, onAddText),
         _tool('Auto Caption', Icons.closed_caption, onAutoCaption),
         _tool('Stickers', Icons.emoji_emotions_outlined, onStickers),
-        _tool('Draw', Icons.draw, () {}),
-        _tool('Text to Audio', Icons.record_voice_over, onTextToAudio),
       ]);
-    } else if (mode == BottomNavMode.filters) {
+    } else if (mode == BottomNavMode.backgroundMusic) {
       tools.addAll([
-        _tool('Original', Icons.filter_none, () => onApplyFilter?.call('none')),
-        _tool('Vintage', Icons.camera, () => onApplyFilter?.call('vintage')),
-        _tool(
-          'Cinematic',
-          Icons.movie_filter,
-          () => onApplyFilter?.call('cinematic'),
-        ),
-        _tool('Warm', Icons.wb_sunny, () => onApplyFilter?.call('warm')),
-        _tool('Cool', Icons.ac_unit, () => onApplyFilter?.call('cool')),
-        _tool('B&W', Icons.grain, () => onApplyFilter?.call('bw')),
+        _tool('Add Music', Icons.library_music, onBackgroundMusic),
+        if (onBackgroundMusic != null) // Optional: show only if needed
+          _tool('Replace', Icons.refresh, onBackgroundMusic),
       ]);
+    } else if (mode == BottomNavMode.overlay ||
+        mode == BottomNavMode.stickers) {
+      // You can add background here too if you want quick access
+      tools.add(_tool('Background', Icons.palette, onBackground));
     }
 
     return Container(
-      height: 70,
+      height: 80,
       color: const Color(0xFF1A1A1A),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(children: tools),
       ),
     );
@@ -126,20 +122,16 @@ class ContextToolbar extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color ?? const Color(0xFF00D9FF), size: 28),
-            const SizedBox(height: 4),
-            Flexible(
-              child: Text(
-                label,
-                style: TextStyle(color: color ?? Colors.white, fontSize: 10),
-                textAlign: TextAlign.center,
-                overflow: TextOverflow.ellipsis,
-                maxLines: 2,
-              ),
+            Icon(icon, color: color ?? const Color(0xFF00D9FF), size: 32),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: TextStyle(color: color ?? Colors.white, fontSize: 11),
+              textAlign: TextAlign.center,
             ),
           ],
         ),

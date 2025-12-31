@@ -20,7 +20,17 @@ class BottomNav extends StatelessWidget {
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(
+
           children: [
+
+            if (currentMode != BottomNavMode.normal)
+              _navButton(
+                Icons.arrow_back_ios_new,
+                '',
+                    () => onModeChanged(BottomNavMode.normal),
+                true,
+              ),
+
             _navButton(
               Icons.edit,
               'Edit',

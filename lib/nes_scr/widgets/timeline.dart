@@ -1,4 +1,4 @@
-
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -6,12 +6,15 @@ import 'package:kwaic/nes_scr/widgets/wave_form_painter.dart';
 import '../model/timeline_item.dart';
 import '../servuices/clip_controller.dart';
 import '../servuices/time_line_controller.dart';
+import '../servuices/video_manager.dart';
+import 'add_clip_tile.dart';
 
 class TimelineView extends StatefulWidget {
   final TimelineController controller;
   final ClipController clipController;
+  final VideoManager videoManager;
   final Duration playheadPosition;
-  final bool isPlaying; // NEW: Pass isPlaying from parent
+  final bool isPlaying;
   final Function(Offset) onTimelineTap;
   final Function(String, TimelineItemType) onClipSelected;
 
@@ -19,6 +22,7 @@ class TimelineView extends StatefulWidget {
     super.key,
     required this.controller,
     required this.clipController,
+    required this.videoManager,
     required this.playheadPosition,
     required this.isPlaying,
     required this.onTimelineTap,
@@ -30,43 +34,44 @@ class TimelineView extends StatefulWidget {
 }
 
 class _TimelineViewState extends State<TimelineView> {
-  final ScrollController _scrollController = ScrollController();
   String? _trimmingClipId;
   bool _trimAtStart = false;
   Offset? _dragStartOffset;
+  double _lastDx = 0;
+
+  // 🔹 CapCut snap state
+  static const double SNAP_PX = 8.0;
+  static const Duration FRAME = Duration(milliseconds: 33);
+
+  bool _isSnapping = false;
 
   @override
   void initState() {
     super.initState();
-    // Rebuild when timeline controller changes (zoom/offset)
     widget.controller.addListener(_onControllerChanged);
-    // If clipController is a ChangeNotifier (expected), listen so selection/trims update UI
     try {
       widget.clipController.addListener(_onClipControllerChanged);
-    } catch (_) {
-      // If clipController is not a ChangeNotifier, ignore. But it's recommended it is.
-    }
+    } catch (_) {}
   }
 
   void _onControllerChanged() => setState(() {});
-
   void _onClipControllerChanged() => setState(() {});
 
   @override
   void didUpdateWidget(covariant TimelineView oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (widget.isPlaying &&
-        widget.playheadPosition != oldWidget.playheadPosition) {
-      final screenWidth = MediaQuery.of(context).size.width;
+    if (widget.isPlaying) {
+      // Force scroll every frame — no conditions
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !widget.controller.scrollController.hasClients) return;
 
-      if (widget.controller.scrollController.hasClients) {
         widget.controller.scrollToTime(
           widget.playheadPosition,
-          screenWidth,
-          animate: true, // ← Changed to true for smooth animation
+          MediaQuery.of(context).size.width,
+          animate: true,
         );
-      }
+      });
     }
   }
 
@@ -76,21 +81,62 @@ class _TimelineViewState extends State<TimelineView> {
     try {
       widget.clipController.removeListener(_onClipControllerChanged);
     } catch (_) {}
-    _scrollController.dispose();
     super.dispose();
   }
+
+  // =======================
+// SNAP UTILITIES
+// =======================
+
+  Duration _snapTime(
+      Duration raw,
+      List<Duration> snapPoints,
+      double pixelsPerSecond,
+      ) {
+    final snapPx = _lastDx > 12 ? 3.0 : SNAP_PX;
+
+    for (final p in snapPoints) {
+      final dx =
+          (raw.inMilliseconds - p.inMilliseconds).abs() /
+              1000 *
+              pixelsPerSecond;
+
+      if (dx <= snapPx) {
+        _isSnapping = true;
+        return p;
+      }
+    }
+
+    _isSnapping = false;
+    return raw;
+  }
+
+  List<Duration> _collectSnapPoints(TimelineItem clip) {
+    final points = <Duration>[
+      widget.controller.currentTime, // playhead
+    ];
+
+    for (final c in widget.clipController.videoClips) {
+      if (c.id == clip.id) continue;
+      points.add(c.startTime);
+      points.add(c.startTime + c.duration);
+    }
+
+    return points;
+  }
+
 
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
     final centerX = screenWidth / 2;
-    final bool isTablet = screenWidth > 700;
-    final double timelineHeight = isTablet ? 300 : 260;
+    final isTablet = screenWidth > 700;
+    final timelineHeight = isTablet ? 300.0 : 260.0;
 
     return SizedBox(
       height: timelineHeight,
       child: Container(
-        color: const Color(0xFF000000),
+        color: Colors.black,
         child: GestureDetector(
           onTapDown: (details) => widget.onTimelineTap(details.localPosition),
           onHorizontalDragUpdate:
@@ -98,60 +144,154 @@ class _TimelineViewState extends State<TimelineView> {
           onScaleUpdate: (details) {
             if (details.scale != 1.0) _handleZoom(details.scale, screenWidth);
           },
-          child: Stack(
-            children: [
-              SingleChildScrollView(
-                controller: widget.controller.scrollController,
-                scrollDirection: Axis.horizontal,
-                physics: const ClampingScrollPhysics(),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    minWidth: screenWidth,
-                    maxWidth: math.max(
-                      (widget.controller.totalDuration.inMilliseconds /
-                          1000.0) *
-                          widget.controller.pixelsPerSecond +
-                          screenWidth,
-                      screenWidth,
+          child: ClipRect(
+            // ← This fixes overflow pixels
+            child: Stack(
+              children: [
+                SingleChildScrollView(
+                  controller: widget.controller.scrollController,
+                  scrollDirection: Axis.horizontal,
+                  physics: const ClampingScrollPhysics(),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minWidth: screenWidth,
+                      maxWidth: math.max(
+                        (widget.controller.totalDuration.inMilliseconds /
+                                1000.0) *
+                            widget.controller.pixelsPerSecond,
+                        screenWidth,
+                      ),
                     ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 8,
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildDurationRuler(screenWidth, centerX),
-                        const SizedBox(height: 8),
-                        if (_shouldShowVideoTrack()) _buildVideoTrack(centerX),
-                        if (_shouldShowVideoTrack()) const SizedBox(height: 4),
-                        if (_shouldShowAudioTrack()) _buildAudioTrack(centerX),
-                        if (_shouldShowAudioTrack()) const SizedBox(height: 4),
-                        if (_shouldShowTextTrack()) _buildTextTrack(centerX),
-                        if (_shouldShowTextTrack()) const SizedBox(height: 4),
-                        if (_shouldShowOverlayTrack())
-                          _buildOverlayTrack(centerX),
-                      ],
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _buildDurationRuler(screenWidth, centerX),
+                          const SizedBox(height: 8),
+                          if (_shouldShowVideoTrack())
+                            _buildVideoTrack(centerX),
+                          if (_shouldShowVideoTrack())
+                            const SizedBox(height: 4),
+                          if (_shouldShowAudioTrack())
+                            _buildAudioTrack(centerX),
+                          if (_shouldShowAudioTrack())
+                            const SizedBox(height: 4),
+                          if (_shouldShowTextTrack()) _buildTextTrack(centerX),
+                          if (_shouldShowTextTrack()) const SizedBox(height: 4),
+                          if (_shouldShowOverlayTrack())
+                            _buildOverlayTrack(centerX),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-              _buildCenteredPlayhead(screenWidth),
-            ],
+                _buildCenteredPlayhead(screenWidth),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
+  Widget _buildDurationRuler(double screenWidth, double centerX) {
+    final totalDuration = widget.controller.totalDuration;
+    final totalSeconds = totalDuration.inMilliseconds / 1000.0;
+    final pixelsPerSecond = widget.controller.pixelsPerSecond;
+    final timelineOffset = widget.controller.timelineOffset;
+
+    if (totalSeconds <= 0) return const SizedBox(height: 40);
+
+    final List<Widget> labels = [];
+
+    // Show time label every 5 seconds (adjust based on zoom)
+    double interval = 5.0;
+    if (pixelsPerSecond < 50)
+      interval = 10.0; // Zoomed out
+    else if (pixelsPerSecond > 200)
+      interval = 2.0; // Zoomed in
+    else if (pixelsPerSecond > 400)
+      interval = 1.0;
+
+    // Generate labels
+    for (double t = 0; t <= totalSeconds; t += interval) {
+      final double x = centerX + t * pixelsPerSecond - timelineOffset;
+
+      if (x < -100 || x > screenWidth + 100) continue;
+
+      labels.add(
+        Positioned(
+          left: x - 40,
+          top: 8,
+          child: Text(
+            _formatTime(Duration(milliseconds: (t * 1000).round())),
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Final label at exact end (bold)
+    final double endX =
+        centerX + totalSeconds * pixelsPerSecond - timelineOffset;
+    labels.add(
+      Positioned(
+        left: endX - 60,
+        top: 8,
+        child: Text(
+          _formatTime(totalDuration),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+
+    return SizedBox(height: 40, child: Stack(children: labels));
+  }
+
+  String _formatTime(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    final millis = (duration.inMilliseconds % 1000) ~/ 10; // Show centiseconds
+
+    return '$minutes:${seconds.toString().padLeft(2, '0')}.'
+        '${millis.toString().padLeft(2, '0')}';
+  }
+
   void _handleHorizontalDrag(double deltaPx) {
-    // Use TimelineController's scroll controller (keeps central state consistent)
+    if (widget.isPlaying) {
+      widget.videoManager.pause();
+    }
+
     final sc = widget.controller.scrollController;
     if (sc.hasClients) {
       final newOffset = sc.offset - deltaPx;
       sc.jumpTo(newOffset.clamp(0.0, sc.position.maxScrollExtent));
+
+      final screenWidth = MediaQuery.of(context).size.width;
+      final newPlayheadSec =
+          (newOffset + screenWidth / 2) / widget.controller.pixelsPerSecond;
+      final newPlayhead = Duration(
+        milliseconds: (newPlayheadSec * 1000).round(),
+      );
+
+      // CRITICAL: Force exact frame update on every drag movement
+      widget.videoManager.beginScrub(); // Prevent feedback loop
+      widget.videoManager.forceFrameAt(newPlayhead);
+      widget.controller.currentTime = newPlayhead;
+      widget.videoManager
+          .endScrub(); // Optional: end after small delay if needed
     }
   }
 
@@ -175,26 +315,46 @@ class _TimelineViewState extends State<TimelineView> {
   bool _shouldShowTextTrack() => widget.controller.shouldShowTextTrack();
   bool _shouldShowOverlayTrack() => widget.controller.shouldShowOverlayTrack();
 
-  // === VIDEO TRACK WITH TRIM HANDLES & SPLIT ON TAP ===
   Widget _buildVideoTrack(double centerX) {
+    final clips = widget.clipController.videoClips;
+
+    // Calculate the total width needed for all clips + add button space
+    final Duration totalClipsDuration = clips.fold(Duration.zero, (prev, clip) => prev + clip.duration);
+    final double clipsWidth = (totalClipsDuration.inMilliseconds / 1000.0) * widget.controller.pixelsPerSecond;
+
     return Container(
       height: 60,
-      decoration: BoxDecoration(
-        color: const Color(0xFF0A0A0A),
-        border: Border(
-          top: BorderSide(color: Colors.white.withOpacity(0.1), width: 0.5),
-          bottom: BorderSide(color: Colors.white.withOpacity(0.1), width: 0.5),
-        ),
-      ),
+      color: const Color(0xFF0A0A0A),
       child: Stack(
         children: [
-          ...widget.clipController.videoClips
-              .map((clip) => _buildVideoClipWithTrim(clip, centerX))
-              .toList(),
-          // LEFT: Sound On + Cover
-          if (widget.clipController.videoClips.isNotEmpty)
+          // Video clips
+          ...clips.map((clip) => _buildVideoClipWithTrim(clip, centerX)).toList(),
+
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: GestureDetector(
+                onTap: () => debugPrint('Add clip'),
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF00D9FF),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(color: Colors.black54, blurRadius: 8, offset: Offset(0, 4)),
+                    ],
+                  ),
+                  child: const Icon(Icons.add, color: Colors.black, size: 32),
+                ),
+              ),
+            ),
+          ),
+          // Optional: Left side buttons (Mute, Cover, etc.)
+          if (clips.isNotEmpty)
             Positioned(
-              left: centerX - widget.controller.timelineOffset - 120,
+              left: centerX - widget.controller.timelineOffset - 140,
               top: 8,
               child: Row(
                 children: [
@@ -204,23 +364,6 @@ class _TimelineViewState extends State<TimelineView> {
                 ],
               ),
             ),
-          // RIGHT: Add Video
-          Positioned(
-            right: 12,
-            top: 16,
-            child: GestureDetector(
-              onTap: () => debugPrint('Add Video'),
-              child: Container(
-                width: 28,
-                height: 28,
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.add, color: Colors.black, size: 18),
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -230,12 +373,14 @@ class _TimelineViewState extends State<TimelineView> {
     final isSelected = widget.clipController.selectedClipId == item.id;
     final isTrimming =
         _trimmingClipId == item.id ||
-            widget.controller.isTrimMode && widget.controller.trimClipId == item.id;
-    // Calculate left X relative to center of timeline
+        (widget.controller.isTrimMode &&
+            widget.controller.trimClipId == item.id);
+
     final startX =
         (item.startTime.inMilliseconds / 1000.0) *
             widget.controller.pixelsPerSecond -
-            widget.controller.timelineOffset;
+        widget.controller.timelineOffset;
+
     final width = math.max(
       (item.duration.inMilliseconds / 1000.0) *
           widget.controller.pixelsPerSecond /
@@ -244,234 +389,226 @@ class _TimelineViewState extends State<TimelineView> {
     );
 
     return Positioned(
-      left: startX + centerX,
-      child: GestureDetector(
-        onTap: () {
-          final playheadSec = widget.playheadPosition.inMilliseconds / 1000.0;
-          final clipStart = item.startTime.inMilliseconds / 1000.0;
-          final clipEnd =
-              clipStart + (item.duration.inMilliseconds / 1000.0 / item.speed);
-          // If playhead is inside clip -> split (like your original logic)
-          if (playheadSec > clipStart && playheadSec < clipEnd) {
-            widget.clipController.splitClip(item, widget.playheadPosition);
-            return;
-          }
-          // Otherwise select clip and notify parent (which should open editor/preview)
-          widget.clipController.selectClip(item.id, item.type);
-          // ensure controller stores selection
-          widget.onClipSelected(item.id, item.type);
-        },
-        child: Container(
-          width: width,
-          height: 60,
-          decoration: BoxDecoration(
-            color: Colors.grey[850],
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color:
-              isTrimming
-                  ? Colors.orange
-                  : (isSelected
-                  ? const Color(0xFF00D9FF)
-                  : Colors.transparent),
-              width: isTrimming ? 4 : (isSelected ? 3 : 0),
-            ),
-          ),
-          child: Stack(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: _buildThumbnailStrip(item, width),
+      left: startX + centerX - 12,
+      child: SizedBox(
+        width: width + 24,
+        height: 60,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned(
+              left: 12,
+              child: Container(
+                width: width,
+                height: 60,
+                decoration: BoxDecoration(
+                  color: Colors.grey[850],
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color:
+                        isTrimming
+                            ? Colors.orange
+                            : (isSelected
+                                ? const Color(0xFF00D9FF)
+                                : Colors.transparent),
+                    width: isTrimming ? 4 : (isSelected ? 3 : 0),
+                  ),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: _buildThumbnailStrip(item, width),
+                ),
               ),
-              // Trim handles (visible when trimming or on long-press to enable manual trim)
+            ),
+
+            if (isSelected || isTrimming)
               Positioned(
                 left: 0,
-                top: 0,
-                bottom: 0,
+                top: 6,
+                bottom: 6,
                 child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onHorizontalDragStart: (_) {
-                    _trimAtStart = true;
-                    _trimmingClipId = item.id;
-                    widget.controller.enterTrimMode(item.id, atStart: true);
-                    widget.onClipSelected(item.id, item.type);
-                    setState(() {});
-                  },
                   onHorizontalDragUpdate:
                       (d) => _handleTrimDrag(item, d.delta.dx, true),
                   onHorizontalDragEnd: (_) => _finishTrim(),
                   child: Container(
-                    width: 12,
-                    color: Colors.transparent,
-                    child: const Center(
-                      child: Icon(
-                        Icons.drag_handle,
-                        color: Colors.white54,
-                        size: 16,
+                    width: 24,
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.horizontal(
+                        left: Radius.circular(10),
+                      ),
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 6,
+                        height: 44,
+                        color: Colors.black54,
                       ),
                     ),
                   ),
                 ),
               ),
+
+            if (isSelected || isTrimming)
               Positioned(
                 right: 0,
-                top: 0,
-                bottom: 0,
+                top: 6,
+                bottom: 6,
                 child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onHorizontalDragStart: (_) {
-                    _trimAtStart = false;
-                    _trimmingClipId = item.id;
-                    widget.controller.enterTrimMode(item.id, atStart: false);
-                    widget.clipController.selectClip(item.id, item.type);
-                    setState(() {});
-                  },
                   onHorizontalDragUpdate:
                       (d) => _handleTrimDrag(item, d.delta.dx, false),
                   onHorizontalDragEnd: (_) => _finishTrim(),
                   child: Container(
-                    width: 12,
-                    color: Colors.transparent,
-                    child: const Center(
-                      child: Icon(
-                        Icons.drag_handle,
-                        color: Colors.white54,
-                        size: 16,
+                    width: 24,
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.horizontal(
+                        right: Radius.circular(10),
                       ),
                     ),
-                  ),
-                ),
-              ),
-              // Left handle — white, prominent
-              Positioned(
-                left: 0,
-                top: 0,
-                bottom: 0,
-                child: GestureDetector(
-                  onHorizontalDragStart: (_) {
-                    widget.controller.enterTrimMode(item.id, atStart: true);
-                    setState(() {});
-                  },
-                  onHorizontalDragUpdate: (d) => _handleTrimDrag(item, d.delta.dx, true),
-                  child: Container(
-                    width: 16,
-                    color: Colors.transparent,
                     child: Center(
                       child: Container(
                         width: 6,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(3),
-                          color: Colors.white
-                        ),
+                        height: 44,
+                        color: Colors.black54,
                       ),
                     ),
                   ),
                 ),
               ),
-            ],
-          ),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                widget.clipController.selectClip(item.id, item.type);
+                widget.onClipSelected(item.id, item.type);
+
+                widget.videoManager.forceFrameAt(widget.playheadPosition);
+              },
+
+              onDoubleTap: () {
+                // Split on double-tap (CapCut style)
+                final playheadSec = widget.playheadPosition.inMilliseconds / 1000.0;
+                final clipStart = item.startTime.inMilliseconds / 1000.0;
+                final clipEnd = clipStart + (item.duration.inMilliseconds / 1000.0 / item.speed);
+                if (playheadSec > clipStart && playheadSec < clipEnd) {
+                  widget.clipController.splitClip(item, widget.playheadPosition);
+                }
+              },
+              onHorizontalDragStart: (_) {
+                widget.videoManager.beginScrub();
+              },
+              onHorizontalDragUpdate: (d) {
+                final deltaSec = d.delta.dx / widget.controller.pixelsPerSecond;
+                final newStart =
+                    item.startTime +
+                    Duration(milliseconds: (deltaSec * 1000).round());
+
+                if (newStart >= Duration.zero) {
+                  item.startTime = newStart;
+                  widget.clipController.updateClip(item);
+
+                  // 🔑 Scrub preview only (NO seek)
+                  final activeVideo = widget.clipController.getActiveVideoClip(
+                    widget.controller.currentTime,
+                  );
+
+                  if (activeVideo != null) {
+                    widget.videoManager.forceFrameAt(
+                      widget.controller.currentTime,
+                    );
+                  }
+                }
+              },
+              onHorizontalDragEnd: (_) {
+                widget.videoManager.endScrub();
+              },
+
+              child: Container(
+                width: width + 24,
+                height: 60,
+                color: Colors.transparent,
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
   void _finishTrim() {
-    // finish trims and exit trim mode
     _trimmingClipId = null;
     widget.controller.exitTrimMode();
+
+    widget.videoManager.endScrub();
+    widget.videoManager.forceFrameAt(widget.controller.currentTime);
+
     setState(() {});
   }
 
-  /// deltaPx is positive when dragging to the right.
   void _handleTrimDrag(
       TimelineItem clip,
       double deltaPx,
       bool draggingStartHandle,
       ) {
-    final deltaSec = deltaPx / widget.controller.pixelsPerSecond;
-    final delta = Duration(milliseconds: (deltaSec * 1000).round());
+    widget.videoManager.beginScrub();
+
+    final pps = widget.controller.pixelsPerSecond;
+    Duration delta =
+    Duration(milliseconds: ((deltaPx / pps) * 1000).round());
+
+    // 🔒 Frame lock
+    delta = Duration(
+      milliseconds:
+      (delta.inMilliseconds ~/ FRAME.inMilliseconds) *
+          FRAME.inMilliseconds,
+    );
+
+    final snapPoints = _collectSnapPoints(clip);
+
     setState(() {
-      // Non-destructive trim behaviour:
-      // - Adjust clip.trimStart and clip.duration; do NOT edit clip.originalSource
       if (draggingStartHandle) {
-        // Move trim start forward/back
-        final newTrimStart = (clip.trimStart + delta).clamp(
-          Duration.zero,
-          clip.originalDuration - const Duration(milliseconds: 100),
-        );
-        // How much physical time on timeline should shift: if you change trimStart, the visible start
-        // may need to move forward on timeline as well (we keep startTime updated so timeline shows anchored effect)
-        final diff = newTrimStart - clip.trimStart;
-        clip.trimStart = newTrimStart;
-        // If trimming start, we effectively shift displayed start forward by diff
-        clip.startTime = (clip.startTime + diff).clamp(
-          Duration.zero,
-          clip.startTime + clip.duration,
-        );
-        // reduce visible duration accordingly (can't be negative)
-        clip.duration = (clip.duration - diff).clamp(
-          Duration.zero,
-          clip.originalDuration - clip.trimStart,
-        );
+        final rawTrim = clip.trimStart + delta;
+
+        final snappedTrim =
+        _snapTime(rawTrim, snapPoints, pps)
+            .clamp(Duration.zero, clip.originalDuration);
+
+        final diff = snappedTrim - clip.trimStart;
+
+        clip.trimStart = snappedTrim;
+        clip.startTime += diff;
+        clip.duration -= diff;
       } else {
-        // dragging end handle -> change visible duration only
-        final newDuration = (clip.duration + delta).clamp(
+        final rawDuration = clip.duration + delta;
+
+        final snapped =
+            _snapTime(
+              clip.startTime + rawDuration,
+              snapPoints,
+              pps,
+            ) -
+                clip.startTime;
+
+        clip.duration = snapped.clamp(
           const Duration(milliseconds: 100),
           clip.originalDuration - clip.trimStart,
         );
-        clip.duration = newDuration;
       }
-      // If handle gets anchored to playhead (within threshold), enter trim mode anchored
-      _maybeEnterTrimModeIfEdgeAtPlayhead(clip, draggingStartHandle);
-      widget.clipController.updateClip(clip); // push change for preview/player
+
+      widget.clipController.updateClip(clip);
     });
+
+    widget.videoManager.forceFrameAt(widget.playheadPosition);
   }
 
-  void _maybeEnterTrimModeIfEdgeAtPlayhead(
-      TimelineItem clip,
-      bool draggingStartHandle,
-      ) {
-    // compute edge time (seconds)
-    final edgeTime =
-    (draggingStartHandle
-        ? clip.startTime
-        : (clip.startTime + clip.duration));
-    final playheadTime = widget.playheadPosition;
-    final diffMs = (edgeTime - playheadTime).inMilliseconds.abs();
-    // threshold = 150ms (tweakable) -> if within threshold, anchor to playhead and set controller trim mode
-    if (diffMs <= 150) {
-      widget.controller.enterTrimMode(clip.id, atStart: draggingStartHandle);
-      // Optionally snap clip edge to playhead in UI (non-destructive: we adjust start or duration for display only)
-      if (draggingStartHandle) {
-        // snap start to playhead
-        final snapDiff = playheadTime - clip.startTime;
-        clip.startTime = playheadTime;
-        // adjust trimStart accordingly
-        clip.trimStart = (clip.trimStart + snapDiff).clamp(
-          Duration.zero,
-          clip.originalDuration,
-        );
-        // reduce duration by snapDiff amount
-        clip.duration = (clip.duration - snapDiff).clamp(
-          Duration.zero,
-          clip.originalDuration - clip.trimStart,
-        );
-      } else {
-        // snap end to playhead -> set duration = playhead - start
-        final newDuration = (playheadTime - clip.startTime).clamp(
-          Duration.zero,
-          clip.originalDuration - clip.trimStart,
-        );
-        clip.duration = newDuration;
-      }
-      _trimmingClipId = clip.id;
-    }
-  }
-
-  // === AUDIO / TEXT / OVERLAY CLIPS (ROBUST + DRAG + LONG PRESS) ===
   Widget _buildAudioClip(TimelineItem item, double centerX) {
-    // If waveform hasn't been generated yet
+    final startX =
+        item.startTime.inMilliseconds /
+            1000.0 *
+            widget.controller.pixelsPerSecond -
+        widget.controller.timelineOffset;
+    final width = _clipWidth(item);
+
     if (item.waveformData == null) {
       return _buildSecondaryClip(
         item: item,
@@ -484,86 +621,20 @@ class _TimelineViewState extends State<TimelineView> {
       );
     }
 
-    // Waveform is ready
-    return _buildSecondaryClip(
-      item: item,
-      centerX: centerX,
-      color: const Color(0xFF10B981),
-      child: SizedBox(
-        height: 50, // Adjust as needed
-        child: CustomPaint(
-          painter: AudioWaveformPainter(
-            waveform: item.waveformData!, // ✅ Waveform type
-            color: Colors.white,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTextClip(TimelineItem item, double centerX) =>
-      _buildSecondaryClip(
-        item: item,
-        centerX: centerX,
-        color: Color(0xFFF59E0B),
-        child: Text(
-          item.text ?? 'Text',
-          style: TextStyle(color: Colors.white, fontSize: 11),
-        ),
-      );
-
-  Widget _buildStickerClip(TimelineItem item, double centerX) =>
-      _buildSecondaryClip(
-        item: item,
-        centerX: centerX,
-        color: Color(0xFF9333EA),
-        child:
-        item.file != null
-            ? Image.file(item.file!, width: 40, height: 40)
-            : Icon(Icons.emoji_emotions_outlined),
-      );
-
-  Widget _buildOverlayClip(TimelineItem item, double centerX) =>
-      _buildSecondaryClip(
-        item: item,
-        centerX: centerX,
-        color: const Color(0xFF9333EA),
-        child:
-        item.file != null
-            ? Image.file(item.file!, fit: BoxFit.cover)
-            : const Icon(Icons.image, color: Colors.white, size: 20),
-      );
-
-  Widget _buildSecondaryClip({
-    required TimelineItem item,
-    required double centerX,
-    required Color color,
-    required Widget child,
-  }) {
-    final isSelected = widget.clipController.selectedClipId == item.id;
-    final startX =
-        item.startTime.inMilliseconds /
-            1000 *
-            widget.controller.pixelsPerSecond -
-            widget.controller.timelineOffset;
-    final width = _clipWidth(item);
-
     return Positioned(
       left: startX + centerX,
       child: GestureDetector(
+        behavior: HitTestBehavior.opaque, // ← Critical for drag
         onTap: () {
           widget.clipController.selectClip(item.id, item.type);
           widget.onClipSelected(item.id, item.type);
         },
         onLongPress: () => _showClipOptions(item),
-        onHorizontalDragStart:
-            (_) => _dragStartOffset = Offset(startX + centerX, 0),
         onHorizontalDragUpdate: (d) {
-          if (_dragStartOffset == null) return;
           final deltaSec = d.delta.dx / widget.controller.pixelsPerSecond;
           final newStart =
               item.startTime +
-                  Duration(milliseconds: (deltaSec * 1000).round());
+              Duration(milliseconds: (deltaSec * 1000).round());
           if (newStart >= Duration.zero) {
             setState(() {
               item.startTime = newStart;
@@ -571,6 +642,233 @@ class _TimelineViewState extends State<TimelineView> {
             });
           }
         },
+        child: Container(
+          width: width,
+          height: 46,
+          margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+          decoration: BoxDecoration(
+            color: const Color(0xFF10B981).withOpacity(0.3),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color:
+                  widget.clipController.selectedClipId == item.id
+                      ? const Color(0xFF00D9FF)
+                      : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: CustomPaint(
+              painter: AudioWaveformPainter(
+                waveform: item.waveformData!,
+                color: const Color(0xFF10B981),
+              ),
+              size: Size(width, 46),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextClip(TimelineItem item, double centerX) {
+    final startX =
+        item.startTime.inMilliseconds /
+            1000.0 *
+            widget.controller.pixelsPerSecond -
+        widget.controller.timelineOffset;
+    final width = _clipWidth(item);
+
+    return Positioned(
+      left: startX + centerX,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          widget.clipController.selectClip(item.id, item.type);
+          widget.onClipSelected(item.id, item.type);
+        },
+        onHorizontalDragStart: (_) {
+          widget.videoManager.beginScrub();
+        },
+        onHorizontalDragUpdate: (d) {
+          final deltaSec = d.delta.dx / widget.controller.pixelsPerSecond;
+          final newStart =
+              item.startTime +
+              Duration(milliseconds: (deltaSec * 1000).round());
+
+          if (newStart >= Duration.zero) {
+            item.startTime = newStart;
+            widget.clipController.updateClip(item);
+
+            final activeVideo = widget.clipController.getActiveVideoClip(
+              widget.controller.currentTime,
+            );
+
+            if (activeVideo != null) {
+              widget.videoManager.forceFrameAt(widget.controller.currentTime);
+            }
+          }
+        },
+        onHorizontalDragEnd: (_) {
+          widget.videoManager.endScrub();
+        },
+
+        child: Container(
+          width: width,
+          height: 46,
+          margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+          decoration: BoxDecoration(
+            color: Color(0xFFF59E0B),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color:
+                  widget.clipController.selectedClipId == item.id
+                      ? const Color(0xFF00D9FF)
+                      : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              item.text ?? 'Text',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOverlayClip(TimelineItem item, double centerX) {
+    final startX =
+        item.startTime.inMilliseconds /
+            1000.0 *
+            widget.controller.pixelsPerSecond -
+        widget.controller.timelineOffset;
+    final width = _clipWidth(item);
+
+    return Positioned(
+      left: startX + centerX,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          widget.clipController.selectClip(item.id, item.type);
+          widget.onClipSelected(item.id, item.type);
+        },
+        onHorizontalDragStart: (_) {
+          widget.videoManager.beginScrub();
+        },
+        onHorizontalDragUpdate: (d) {
+          final deltaSec = d.delta.dx / widget.controller.pixelsPerSecond;
+          final newStart =
+              item.startTime +
+              Duration(milliseconds: (deltaSec * 1000).round());
+
+          if (newStart >= Duration.zero) {
+            item.startTime = newStart;
+            widget.clipController.updateClip(item);
+
+            final activeVideo = widget.clipController.getActiveVideoClip(
+              widget.controller.currentTime,
+            );
+
+            if (activeVideo != null) {
+              widget.videoManager.forceFrameAt(widget.controller.currentTime);
+            }
+          }
+        },
+        onHorizontalDragEnd: (_) {
+          widget.videoManager.endScrub();
+        },
+
+        child: Container(
+          width: width,
+          height: 46,
+          margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+          decoration: BoxDecoration(
+            color: const Color(0xFF9333EA),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color:
+                  widget.clipController.selectedClipId == item.id
+                      ? const Color(0xFF00D9FF)
+                      : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child:
+                item.file != null
+                    ? Image.file(
+                      item.file!,
+                      fit: BoxFit.cover,
+                      width: width,
+                      height: 46,
+                    )
+                    : const Icon(Icons.image, color: Colors.white, size: 20),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSecondaryClip({
+    required TimelineItem item,
+    required double centerX,
+    required Color color,
+    required Widget child,
+  })
+  {
+    final isSelected = widget.clipController.selectedClipId == item.id;
+    final startX =
+        item.startTime.inMilliseconds /
+            1000 *
+            widget.controller.pixelsPerSecond -
+        widget.controller.timelineOffset;
+    final width = _clipWidth(item);
+
+    return Positioned(
+      left: startX + centerX,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque, // ← This fixes drag
+        onTap: () {
+          widget.clipController.selectClip(item.id, item.type);
+          widget.onClipSelected(item.id, item.type);
+        },
+        onLongPress: () => _showClipOptions(item),
+        onHorizontalDragStart: (_) {
+          widget.videoManager.beginScrub();
+        },
+        onHorizontalDragUpdate: (d) {
+          final deltaSec = d.delta.dx / widget.controller.pixelsPerSecond;
+          final newStart =
+              item.startTime +
+              Duration(milliseconds: (deltaSec * 1000).round());
+
+          if (newStart >= Duration.zero) {
+            item.startTime = newStart;
+            widget.clipController.updateClip(item);
+
+            final activeVideo = widget.clipController.getActiveVideoClip(
+              widget.controller.currentTime,
+            );
+
+            if (activeVideo != null) {
+              widget.videoManager.forceFrameAt(widget.controller.currentTime);
+            }
+          }
+        },
+        onHorizontalDragEnd: (_) {
+          widget.videoManager.endScrub();
+        },
+
         child: Container(
           width: width,
           height: 46,
@@ -595,116 +893,46 @@ class _TimelineViewState extends State<TimelineView> {
       backgroundColor: const Color(0xFF1A1A1A),
       builder:
           (_) => Container(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Clip Options',
-              style: TextStyle(color: Colors.white, fontSize: 18),
-            ),
-            const SizedBox(height: 20),
-            ListTile(
-              leading: const Icon(
-                Icons.content_cut,
-                color: Color(0xFF00D9FF),
-              ),
-              title: const Text(
-                'Split',
-                style: TextStyle(color: Colors.white),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                widget.clipController.splitClip(
-                  item,
-                  widget.playheadPosition,
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete, color: Colors.red),
-              title: const Text(
-                'Delete',
-                style: TextStyle(color: Colors.red),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                widget.clipController.deleteClip(item.id, item.type);
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // === REST OF THE CODE (unchanged except using timeline controller state) ===
-  Widget _buildDurationRuler(double screenWidth, double centerX) {
-    final totalSec = widget.controller.totalDuration.inMilliseconds / 1000.0;
-    final pixelsPerSecond = widget.controller.pixelsPerSecond;
-    final timelineOffset = widget.controller.timelineOffset;
-
-    final visibleSec = screenWidth / pixelsPerSecond;
-    final centerSecond = timelineOffset / pixelsPerSecond;
-    final halfScreenSec = visibleSec / 2;
-
-    // Adaptive step: denser when zoomed in
-    double step =
-    pixelsPerSecond > 150
-        ? 0.1
-        : pixelsPerSecond > 80
-        ? 0.5
-        : 1.0;
-
-    double start = (centerSecond - halfScreenSec).floorToDouble();
-    double end = (centerSecond + halfScreenSec).ceilToDouble();
-
-    final List<Widget> ticks = [];
-
-    for (double s = start; s <= end; s += step) {
-      if (s < 0 || s > totalSec + 2) continue;
-
-      final isMajor = (s % 1 == 0); // Full seconds get labels
-      final posX = centerX + (s * pixelsPerSecond) - timelineOffset;
-
-      if (posX < -50 || posX > screenWidth + 50) continue; // Slight buffer
-
-      ticks.add(
-        Positioned(
-          left: posX,
-          top: 0,
-          child: Column(
-            children: [
-              if (isMajor)
-                Text(
-                  _formatTime(Duration(milliseconds: (s * 1000).round())),
-                  style: const TextStyle(
-                    fontSize: 10,
-                    color: Colors.white70,
-                    height: 1.2,
-                  ),
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Clip Options',
+                  style: TextStyle(color: Colors.white, fontSize: 18),
                 ),
-              if (isMajor) const SizedBox(height: 2),
-              Container(
-                width: 1,
-                height: isMajor ? 10 : 5,
-                color: Colors.white70,
-              ),
-            ],
+                const SizedBox(height: 20),
+                ListTile(
+                  leading: const Icon(
+                    Icons.content_cut,
+                    color: Color(0xFF00D9FF),
+                  ),
+                  title: const Text(
+                    'Split',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  onTap: () {
+                    Navigator.pop(context);
+                    widget.clipController.splitClip(
+                      item,
+                      widget.playheadPosition,
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.delete, color: Colors.red),
+                  title: const Text(
+                    'Delete',
+                    style: TextStyle(color: Colors.red),
+                  ),
+                  onTap: () {
+                    Navigator.pop(context);
+                    widget.clipController.deleteClip(item.id, item.type);
+                  },
+                ),
+              ],
+            ),
           ),
-        ),
-      );
-    }
-
-    return SizedBox(
-      height: 34,
-      child: Stack(
-        children: [
-          // REMOVED: The horizontal line (painted border)
-          // This was the line you didn't want
-          ...ticks,
-        ],
-      ),
     );
   }
 
@@ -739,12 +967,13 @@ class _TimelineViewState extends State<TimelineView> {
       widget.playheadPosition,
     );
     Uint8List? coverBytes;
+
     if (activeClip != null &&
         activeClip.thumbnailBytes != null &&
         activeClip.thumbnailBytes!.isNotEmpty) {
       final progress =
           (widget.playheadPosition - activeClip.startTime).inMilliseconds /
-              activeClip.duration.inMilliseconds;
+          activeClip.duration.inMilliseconds;
       final index = (progress * activeClip.thumbnailBytes!.length)
           .floor()
           .clamp(0, activeClip.thumbnailBytes!.length - 1);
@@ -797,44 +1026,36 @@ class _TimelineViewState extends State<TimelineView> {
     );
   }
 
+  // In TimelineView.dart
   Widget _buildThumbnailStrip(TimelineItem item, double clipWidth) {
-    if (item.thumbnailBytes == null || item.thumbnailBytes!.isEmpty) {
-      return Container(
-        color: const Color(0xFF2A2A2A),
-        child: const Center(
-          child: Icon(Icons.videocam, color: Colors.white30, size: 24),
-        ),
-      );
+    final thumbs = item.thumbnailBytes;
+    if (thumbs == null || thumbs.isEmpty) {
+      return Container(color: const Color(0xFF2A2A2A));
     }
 
-    final thumbCount = item.thumbnailBytes!.length;
-    final thumbWidth = 120.0;
+    const double thumbWidth = 90.0;
+
+    final int count = thumbs.length;
+    final double usedWidth = thumbWidth * (count - 1);
+    final double lastThumbWidth =
+    (clipWidth - usedWidth).clamp(thumbWidth * 0.5, thumbWidth * 2);
 
     return SizedBox(
       width: clipWidth,
       height: 60,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        physics: const NeverScrollableScrollPhysics(),
-        itemCount: (clipWidth / thumbWidth).ceil() + 5,
-        itemBuilder: (context, index) {
-          final thumbIndex = index % thumbCount;
-          final bytes = item.thumbnailBytes![thumbIndex];
-          return SizedBox(
-            width: thumbWidth,
-            height: 60,
-            child: Image.memory(
-              bytes,
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              errorBuilder:
-                  (_, __, ___) => Container(
-                color: const Color(0xFF2A2A2A),
-                child: const Icon(Icons.error, color: Colors.white30),
+      child: Row(
+        children: [
+          for (int i = 0; i < count; i++)
+            SizedBox(
+              width: i == count - 1 ? lastThumbWidth : thumbWidth,
+              height: 60,
+              child: Image.memory(
+                thumbs[i],
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
               ),
             ),
-          );
-        },
+        ],
       ),
     );
   }
@@ -844,7 +1065,7 @@ class _TimelineViewState extends State<TimelineView> {
     widget.clipController.audioClips,
     _buildAudioClip,
     Icons.audiotrack,
-        () => debugPrint("Add Audio"),
+    () => debugPrint("Add Audio"),
     "Add Audio",
   );
 
@@ -853,7 +1074,7 @@ class _TimelineViewState extends State<TimelineView> {
     widget.clipController.textClips,
     _buildTextClip,
     Icons.text_fields,
-        () => debugPrint("Add Text"),
+    () => debugPrint("Add Text"),
     "Add Text",
   );
 
@@ -862,20 +1083,20 @@ class _TimelineViewState extends State<TimelineView> {
     widget.clipController.overlayClips,
     _buildOverlayClip,
     Icons.layers,
-        () => debugPrint("Add Overlay"),
+    () => debugPrint("Add Overlay"),
     "Add Overlay",
   );
 
   Widget _buildSecondaryTrack(
-      double centerX,
-      List<TimelineItem> clips,
-      Widget Function(TimelineItem, double) buildClip,
-      IconData icon,
-      VoidCallback onAdd,
-      String addLabel,
-      ) {
+    double centerX,
+    List<TimelineItem> clips,
+    Widget Function(TimelineItem, double) buildClip,
+    IconData icon,
+    VoidCallback onAdd,
+    String addLabel,
+  ) {
     return Container(
-      height: 40,
+      height: 40, // Slightly taller for better look
       decoration: BoxDecoration(
         color: const Color(0xFF0A0A0A),
         border: Border(
@@ -884,37 +1105,50 @@ class _TimelineViewState extends State<TimelineView> {
       ),
       child: Stack(
         children: [
+          // All audio clips
           ...clips.map((c) => buildClip(c, centerX)).toList(),
+
+          // ALWAYS show the track icon on the left
           Positioned(
             left: centerX - widget.controller.timelineOffset - 60,
-            top: 6,
+            top: 12,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 color: const Color(0xFF1A1A1A),
-                borderRadius: BorderRadius.circular(4),
+                borderRadius: BorderRadius.circular(8),
               ),
-              child: Icon(icon, color: Colors.white70, size: 16),
+              child: Icon(icon, color: Colors.white70, size: 20),
             ),
           ),
-          Positioned(
-            left: centerX - widget.controller.timelineOffset + 10,
-            top: 3,
-            child: GestureDetector(
-              onTap: onAdd,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.add, color: Colors.white, size: 14),
-                  SizedBox(width: 3),
-                  Text(
-                    addLabel,
-                    style: const TextStyle(color: Colors.white70, fontSize: 10),
-                  ),
-                ],
+
+          // Show "Add Audio" text only when track is empty
+          if (clips.isEmpty)
+            Positioned(
+              left: centerX - widget.controller.timelineOffset + 10,
+              top: 15,
+              child: GestureDetector(
+                onTap: onAdd,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.add_circle_outline,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      addLabel,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -923,8 +1157,8 @@ class _TimelineViewState extends State<TimelineView> {
   Widget _buildCenteredPlayhead(double screenWidth) {
     return Positioned(
       left: screenWidth / 2 - 1,
-      top: 0,
-      bottom: 0,
+      top: 35,
+      bottom: 4,
       child: IgnorePointer(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -967,28 +1201,8 @@ class _TimelineViewState extends State<TimelineView> {
     );
   }
 
-  String _formatTime(Duration duration) {
-    final minutes = duration.inMinutes;
-    final seconds = duration.inSeconds % 60;
-    final millis = (duration.inMilliseconds % 1000) ~/ 10; // Show centiseconds
 
-    return '$minutes:${seconds.toString().padLeft(2, '0')}.'
-        '${millis.toString().padLeft(2, '0')}';
-  }
-
-  // NEW method in _TimelineViewState
-  void _handleWholeClipDrag(TimelineItem clip, double deltaPx) {
-    final deltaSec = deltaPx / widget.controller.pixelsPerSecond;
-    final delta = Duration(milliseconds: (deltaSec * 1000).round());
-
-    // Calculate new start time, clamp to timeline bounds
-    final newStart = (clip.startTime + delta).clamp(
-      Duration.zero,
-      widget.controller.totalDuration - clip.duration,
-    );
-
-    // Update startTime
-    clip.startTime = newStart;
-    widget.clipController.updateClip(clip); // Triggers rebuild + preview sync
-  }
 }
+
+
+

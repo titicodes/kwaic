@@ -1,57 +1,50 @@
-
-
 import 'package:flutter/material.dart';
 import 'audio_manager.dart';
 import 'video_manager.dart';
 import '../model/timeline_item.dart';
+import '../servuices/time_line_controller.dart';
+import '../servuices/clip_controller.dart'; // ← ADD THIS IMPORT
 
-/// Manages playback state and controls
 class PlaybackController extends ChangeNotifier {
   final VideoManager videoManager;
   final AudioManager audioManager;
-  bool _isPlaying = false;
-  Duration _playheadPosition = Duration.zero;
-  List<TimelineItem> _currentClips = [];
-  List<TimelineItem> _currentAudioItems = [];
+  final TimelineController timelineController;
+  final ClipController clipController; // ← ADD THIS
 
-  bool get isPlaying => _isPlaying;
-  Duration get playheadPosition => _playheadPosition;
+  bool _isPlaying = false;
 
   PlaybackController({
     required this.videoManager,
     required this.audioManager,
+    required this.timelineController,
+    required this.clipController, // ← ADD THIS
   }) {
-    videoManager.onGlobalPositionUpdated = _handlePositionUpdate;
+    // Listen to timeline currentTime changes (scrubbing, tap)
+    timelineController.addListener(_onTimelineTimeChanged);
+
+    // Video position updates timeline during playback
+    videoManager.onGlobalPositionUpdated = _handleVideoPositionUpdate;
   }
 
-  /// Toggle play/pause
-  Future<void> togglePlayPause({
-    required List<TimelineItem> clips,
-    required List<TimelineItem> audioItems,
-  }) async {
+  bool get isPlaying => _isPlaying;
+
+  // Master time comes from timeline
+  Duration get playheadPosition => timelineController.currentTime;
+
+  Future<void> togglePlayPause() async {
     if (videoManager.activeController == null ||
         !videoManager.activeController!.value.isInitialized) {
-      debugPrint('⚠️ PlaybackController: No video loaded');
       return;
     }
 
     _isPlaying = !_isPlaying;
-    _currentClips = clips;
-    _currentAudioItems = audioItems;
     notifyListeners();
 
     if (_isPlaying) {
-      // Wait for video frame to be ready
-      int attempts = 0;
-      while (attempts < 30 && !videoManager.isVideoFrameReady) {
-        await Future.delayed(const Duration(milliseconds: 50));
-        attempts++;
-      }
-
       await videoManager.play();
       await audioManager.playAll(
-        audioItems: audioItems,
-        playheadPosition: _playheadPosition,
+        audioItems: clipController.audioClips,
+        playheadPosition: timelineController.currentTime,
       );
     } else {
       await videoManager.pause();
@@ -59,114 +52,89 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  /// Seek to a specific position
-  Future<void> seekTo(
-      Duration position, {
-        required List<TimelineItem> clips,
-        required List<TimelineItem> audioItems,
-      }) async {
-    _playheadPosition = position;
-    _currentClips = clips;
-    _currentAudioItems = audioItems;
-    notifyListeners();
-
-    // Find active clip at this position
-    final activeClip = _findClipAtPosition(clips, position);
-    if (activeClip != null) {
-      await videoManager.switchToClip(
-        activeClip,
-        playheadPosition: position,
-        isPlaying: _isPlaying,
-      );
-    } else {
-      await stop();
+  // Called when user scrubs or taps timeline
+  Future<void> seekTo(Duration position) async {
+    timelineController.currentTime = position;
+    final clip = clipController.getActiveVideoClip(position);
+    if (clip == null) {
+      videoManager.clear();
       return;
     }
-
-    // Sync audio
-    await audioManager.syncAll(
-      audioItems: audioItems,
-      playheadPosition: position,
-    );
+    await videoManager.forceFrameAt(position);
   }
 
-  /// Internal handler for position updates from VideoManager
-  void _handlePositionUpdate(Duration globalPosition) {
-    _playheadPosition = globalPosition;
+
+  // During playback: video position drives timeline time
+  void _handleVideoPositionUpdate(Duration globalPosition) {
+    if (!_isPlaying) return;
+
+    // Quiet update to avoid excessive rebuilds
+    timelineController.updateTimeQuietly(globalPosition);
     notifyListeners();
 
-    // Check if near end of current clip and advance if needed
     final activeItem = videoManager.activeItem;
-    if (activeItem != null && isPlaying) {
-      final effectiveDuration = Duration(
-        milliseconds: (activeItem.duration.inMilliseconds / activeItem.speed).round(),
+    if (activeItem == null) return;
+
+    final effectiveDuration = Duration(
+      milliseconds: (activeItem.duration.inMilliseconds / activeItem.speed).round(),
+    );
+
+    if (globalPosition >=
+        activeItem.startTime + effectiveDuration - const Duration(milliseconds: 50)) {
+      final nextClip = _findNextClip(
+        clipController.videoClips,
+        activeItem.startTime + effectiveDuration,
       );
-      if (globalPosition >= activeItem.startTime + effectiveDuration - const Duration(milliseconds: 50)) {
-        final nextEnd = activeItem.startTime + effectiveDuration;
-        final nextClip = _findNextClip(_currentClips, nextEnd);
-        if (nextClip != null) {
-          seekTo(
-            nextClip.startTime,
-            clips: _currentClips,
-            audioItems: _currentAudioItems,
-          );
-        } else {
-          stop();
-        }
+
+      if (nextClip != null) {
+        videoManager.switchToClip(
+          nextClip,
+          playheadPosition: nextClip.startTime,
+          isPlaying: true,
+        );
+        timelineController.currentTime = nextClip.startTime;
+      } else {
+        _isPlaying = false;
+        stop();
+        notifyListeners();
       }
+    } else {
+      if ((timelineController.currentTime - globalPosition).abs() > const Duration(milliseconds: 80)) {
+        videoManager.syncToPlayhead(globalPosition);
+      }
+      notifyListeners();
     }
   }
 
-  /// Stop playback
+  // When timeline time changes (scrubbing/tap), force preview to match
+  void _onTimelineTimeChanged() {
+    if (_isPlaying) return; // Let video drive during playback
+    final time = timelineController.currentTime;
+    videoManager.forceFrameAt(time);
+  }
+
   Future<void> stop() async {
     _isPlaying = false;
-    _playheadPosition = Duration.zero;
+    timelineController.currentTime = Duration.zero;
     await videoManager.pause();
     await audioManager.pauseAll();
     await audioManager.seekAll(Duration.zero);
+    videoManager.refreshCurrentFrame(); // Ensure state update after pause
     notifyListeners();
   }
 
-  /// Find the clip at a specific playhead position
-  TimelineItem? _findClipAtPosition(
-      List<TimelineItem> clips,
-      Duration position,
-      ) {
-    for (final clip in clips) {
-      final effectiveDuration = Duration(
-        milliseconds: (clip.duration.inMilliseconds / clip.speed).round(),
-      );
-      if (position >= clip.startTime &&
-          position < clip.startTime + effectiveDuration) {
-        return clip;
-      }
-    }
-    return null;
-  }
 
-  /// Find the next clip after a given time
   TimelineItem? _findNextClip(List<TimelineItem> clips, Duration currentEnd) {
-    if (clips.isEmpty) return null;
-    var sortedClips = [...clips]
-      ..sort((a, b) => a.startTime.compareTo(b.startTime));
-    for (final clip in sortedClips) {
-      if (clip.startTime >= currentEnd) {
-        return clip;
-      }
+    final sorted = [...clips]..sort((a, b) => a.startTime.compareTo(b.startTime));
+    for (final clip in sorted) {
+      if (clip.startTime >= currentEnd) return clip;
     }
     return null;
   }
 
-  /// Get total timeline duration
-  double getTotalDuration(List<List<TimelineItem>> allTracks) {
-    double max = 0;
-    for (final track in allTracks) {
-      if (track.isEmpty) continue;
-      final end = track
-          .map((e) => (e.startTime + e.duration).inSeconds.toDouble())
-          .reduce((a, b) => a > b ? a : b);
-      if (end > max) max = end;
-    }
-    return max;
+  @override
+  void dispose() {
+    timelineController.removeListener(_onTimelineTimeChanged);
+    super.dispose();
   }
 }

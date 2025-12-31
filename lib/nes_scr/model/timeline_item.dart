@@ -13,7 +13,7 @@ import 'package:flutter/material.dart';
 
 import 'keyframe.dart';
 
-enum TimelineItemType { video, audio, image, text, overlay, stickers }
+enum TimelineItemType { video, audio, image, text, overlay, stickers, backgroundMusic, backgroundVisual }
 
 // model/speed_point.dart
 class SpeedPoint {
@@ -46,6 +46,7 @@ enum BottomNavMode {
   effects,
   filters,
   animation,
+  backgroundMusic
 }
 
 // Add this new enum for timeline modes
@@ -74,6 +75,7 @@ class TimelineItem {
   File? file;
   Duration startTime;
   Duration duration;
+
   Duration originalDuration;
   Duration trimStart;
   Duration trimEnd;
@@ -90,7 +92,6 @@ class TimelineItem {
   double cropTop;
   double cropRight;
   double cropBottom;
-  double rotation;
   double scale;
   double? cropX;
   double? cropY;
@@ -110,7 +111,8 @@ class TimelineItem {
   double? endRotation;
   List<SpeedPoint> speedPoints;
   List<Keyframe> keyframes;
-
+  final Duration? fadeIn;
+  final Duration? fadeOut;
   Color? shadowColor;
   double? shadowBlur;
   double? strokeWidth;
@@ -120,14 +122,39 @@ class TimelineItem {
   double? contrast;      // 0 to 200 (100 = normal)
   double? saturation;    // 0 to 200 (100 = normal)
   double? exposure;      // -100 to 100
+  TimelineItem? backgroundMusic;  // Only one background music
+  // For background visuals
+  Color? backgroundColor;     // Solid color background
+  double? blurSigma;          // Blur intensity (0 = no blur)
+
+  Offset? minCrop; // e.g., Offset(0.1, 0.1) = crop 10% from left/top
+  Offset? maxCrop; // e.g., Offset(0.9, 0.9) = crop 10% from right/bottom
+
+  double rotation = 0.0; // in degrees: 0, 90, 180, 270
+
+  Rect? cropRect;   // normalized 0.0–1.0 (left, top, right, bottom)
+  double? cropAspectRatio; // locked aspect ratio (e.g., 1.0, 16/9)
+
+  Offset translate = Offset.zero; // pan offset (from crop drag)
+  String? get videoPath => type == TimelineItemType.video ? file?.path : null;
+
+  // Optional: preferred aspect ratio during crop (null = free)
+  double? preferredCropAspectRatio;
+  String? animationData;
+
 
   TimelineItem({
     required this.id,
     required this.type,
+    this.maxCrop,
+    this.minCrop,
+    this.cropAspectRatio,
+    this.cropRect,
+    this.startTime = Duration.zero,
+    this.duration = Duration.zero,
+    this.originalDuration = Duration.zero,
+    this.preferredCropAspectRatio,
     this.file,
-    required this.startTime,
-    required this.duration,
-    required this.originalDuration,
     this.trimStart = Duration.zero,
     Duration? trimEnd,
     this.speed = 1.0,
@@ -148,6 +175,7 @@ class TimelineItem {
     this.opacity,
     this.x,
     this.y,
+    this.backgroundMusic,
     this.layerIndex = 0,
     this.endX,
     this.endY,
@@ -172,6 +200,11 @@ class TimelineItem {
     this.contrast,
     this.saturation,
     this.exposure,
+    this.fadeIn,
+    this.fadeOut,
+    this.backgroundColor,
+    this.blurSigma,
+    this.animationData,
   }) : trimEnd = trimEnd ?? duration,
         speedPoints = speedPoints ?? [SpeedPoint(time: 0, speed: 1.0)],
         keyframes = keyframes ?? [];
@@ -268,6 +301,10 @@ class TimelineItem {
         contrast: (json['contrast'] as num?)?.toDouble(),
         saturation: (json['saturation'] as num?)?.toDouble(),
         exposure: (json['exposure'] as num?)?.toDouble(),
+        backgroundColor: json['backgroundColor'] != null ? Color(json['backgroundColor']) : null,
+        blurSigma: (json['blurSigma'] as num?)?.toDouble(),
+
+
       );
     } catch (e) {
       debugPrint('Error while parsing TimelineItem: $e');
@@ -287,6 +324,11 @@ class TimelineItem {
       'trimEnd': trimEnd.toJson(),
       'speed': speed,
       'volume': volume,
+      'backgroundColor': backgroundColor?.value,
+      'blurSigma': blurSigma,
+
+// in fromJson
+
       'flipHorizontal': flipHorizontal,
       'flipVertical': flipVertical,
       'animationIn': animationIn,
@@ -325,6 +367,7 @@ class TimelineItem {
       'contrast': contrast,
       'saturation': saturation,
       'exposure': exposure,
+
       //'waveformData': waveformData?.toJson(),
     };
   }
@@ -376,6 +419,10 @@ class TimelineItem {
     double? strokeWidth,
     Color? strokeColor,
     String? animation,
+    Duration? fadeIn,
+    Duration? fadeOut,
+    Color? backgroundColor,
+    double? blurSigma,
 
   }) {
     return TimelineItem(
@@ -429,6 +476,10 @@ class TimelineItem {
       contrast: contrast ?? this.contrast,
       saturation: saturation ?? this.saturation,
       exposure: exposure ?? this.exposure,
+      fadeIn: fadeIn ?? this.fadeIn,
+      fadeOut: fadeOut ?? this.fadeOut,
+      backgroundColor: backgroundColor ?? this.backgroundColor,
+      blurSigma: blurSigma ?? this.blurSigma,
     );
   }
 

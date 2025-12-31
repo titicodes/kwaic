@@ -1,3 +1,4 @@
+
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -8,24 +9,25 @@ import 'package:just_waveform/just_waveform.dart';
 import 'package:kwaic/nes_scr/servuices/time_line_controller.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
 import '../model/timeline_item.dart';
-import '../screen/were.dart';
 import 'video_manager.dart';
 import 'audio_manager.dart';
 
-/// Manages CRUD operations on timeline clips
+/// ClipController - Manages clips and updates TimelineController.totalDuration
+/// Professional architecture: Updates master timeline duration when clips change
 class ClipController extends ChangeNotifier {
-  final VideoManager videoManager;
+  late VideoManager videoManager;
   final AudioManager audioManager;
-
-  late final TimelineController timelineController;
+  final TimelineController timelineController;
 
   List<TimelineItem> _videoClips = [];
   List<TimelineItem> _audioClips = [];
   List<TimelineItem> _textClips = [];
   List<TimelineItem> _overlayClips = [];
-
   List<TimelineItem> _stickerClips = [];
+  TimelineItem? backgroundMusic;  // Only one background music
+  TimelineItem? backgroundVisual;
 
   String? _selectedClipId;
   TimelineItemType? _selectedClipType;
@@ -36,12 +38,12 @@ class ClipController extends ChangeNotifier {
   List<TimelineItem> get overlayClips => List.unmodifiable(_overlayClips);
   List<TimelineItem> get stickerClips => List.unmodifiable(_stickerClips);
 
+
   String? get selectedClipId => _selectedClipId;
   TimelineItemType? get selectedClipType => _selectedClipType;
 
-  String? currentFilter = 'none'; // 'none', 'vintage', 'cinematic', 'warm', 'cool', 'bw'
-
-  String? currentEffect; // 'none', 'shake', 'glitch', etc.
+  String? currentFilter = 'none';
+  String? currentEffect;
 
   void applyEffect(String? effect) {
     currentEffect = effect;
@@ -54,14 +56,17 @@ class ClipController extends ChangeNotifier {
   }
 
   ClipController({
-    required this.videoManager,
+    VideoManager? videoManager,
     required this.audioManager,
     required this.timelineController,
   });
 
-  // Get any clip by ID and type
+  void setVideoManager(VideoManager manager) {
+    videoManager = manager;
+  }
+
+
   TimelineItem? getClipById(String id) {
-    // Search all lists
     for (var clip in videoClips) if (clip.id == id) return clip;
     for (var clip in audioClips) if (clip.id == id) return clip;
     for (var clip in textClips) if (clip.id == id) return clip;
@@ -69,45 +74,127 @@ class ClipController extends ChangeNotifier {
     return null;
   }
 
-  Future<List<Uint8List>> generateRobustThumbnails(
-    String videoPath,
-    Duration duration,
-  ) async {
-    final thumbnails = <Uint8List>[];
-    final tempDir = await getTemporaryDirectory();
-    final outputDir = Directory(
-      '${tempDir.path}/thumbs_${DateTime.now().millisecondsSinceEpoch}',
+  // === Background Music ===
+  void setBackgroundMusic(TimelineItem music) {
+    // Clean up old background music file (optional, saves storage)
+    backgroundMusic?.file?.deleteSync(recursive: false);
+
+    backgroundMusic = music.copyWith(
+      type: TimelineItemType.backgroundMusic,
+      startTime: Duration.zero, // Always starts at beginning
     );
-    await outputDir.create(recursive: true);
 
-    final futures = <Future>[];
-    const count = 12;
+    // Initialize player and generate waveform
+    audioManager.initializePlayer(backgroundMusic!);
+    _generateWaveformForBGM();
 
-    for (int i = 0; i < count; i++) {
-      final progress = i / (count - 1);
-      final timeSec = (duration.inSeconds * progress).toStringAsFixed(3);
-      final outputPath = '${outputDir.path}/thumb_$i.jpg';
+    notifyListeners();
+  }
 
-      final command =
-          '-ss $timeSec -i "$videoPath" -vframes 1 -q:v 3 -y "$outputPath"';
+  void removeBackgroundMusic() {
+    if (backgroundMusic != null) {
+      audioManager.removePlayer(backgroundMusic!.id);
+      backgroundMusic!.file?.deleteSync(recursive: false);
+      backgroundMusic = null;
+      notifyListeners();
+    }
+  }
 
-      futures.add(
-        FFmpegKit.execute(command).then((session) async {
-          if (ReturnCode.isSuccess(await session.getReturnCode())) {
-            final file = File(outputPath);
-            if (await file.exists()) {
-              final bytes = await file.readAsBytes();
-              if (bytes.length > 1000) thumbnails.add(bytes);
-            }
-          }
-        }),
+  void setBackgroundVisual(TimelineItem background) {
+    backgroundVisual?.file?.deleteSync(recursive: false);
+    backgroundVisual = background.copyWith(
+      type: TimelineItemType.backgroundVisual,
+      startTime: Duration.zero,
+      duration: timelineController.totalDuration,
+    );
+    notifyListeners();
+  }
+
+  void removeBackgroundVisual() {
+    backgroundVisual = null;
+    notifyListeners();
+  }
+
+  Future<void> _generateWaveformForBGM() async {
+    if (backgroundMusic == null) return;
+
+    final tempDir = await getTemporaryDirectory();
+    final waveFile = File('${tempDir.path}/wave_bgm_${backgroundMusic!.id}.wave');
+
+    try {
+      final stream = JustWaveform.extract(
+        audioInFile: backgroundMusic!.file!,
+        waveOutFile: waveFile,
       );
+      await for (final progress in stream) {
+        if (progress.waveform != null) {
+          backgroundMusic!.waveformData = progress.waveform!;
+          notifyListeners();
+        }
+      }
+    } catch (e) {
+      debugPrint('Waveform generation failed for BGM: $e');
+    }
+  }
+
+  Future<List<Uint8List>> generateTimelineThumbnails({
+    required String videoPath,
+    required Duration duration,
+    required double pixelsPerSecond,
+  })
+  async {
+
+    const double thumbWidth = 90.0;
+
+    final double clipWidth =
+        (duration.inMilliseconds / 1000.0) * pixelsPerSecond;
+
+    final int thumbCount =
+    math.max(1, (clipWidth / thumbWidth).ceil());
+
+    final double intervalMs =
+        duration.inMilliseconds / thumbCount;
+
+    final List<Uint8List> thumbs = [];
+
+    for (int i = 0; i < thumbCount; i++) {
+      final int timeMs = (i * intervalMs).round();
+
+      Uint8List? data = await VideoThumbnail.thumbnailData(
+        video: videoPath,
+        timeMs: timeMs,
+        imageFormat: ImageFormat.JPEG,
+        maxWidth: 160,
+        quality: 75,
+      );
+
+      if (data != null) {
+        thumbs.add(data);
+      } else if (thumbs.isNotEmpty) {
+        thumbs.add(thumbs.last); // gap fill
+      }
     }
 
-    await Future.wait(futures);
-    await outputDir.delete(recursive: true);
-    return thumbnails;
+    return thumbs;
   }
+
+// Helper for FFmpeg thumbnail
+  Future<Uint8List?> _generateThumbnailFFmpeg(String videoPath, double timeSec) async {
+    final tempDir = await getTemporaryDirectory();
+    final outputPath = '${tempDir.path}/thumb_${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+    final command = '-ss $timeSec -i "$videoPath" -frames:v 1 -q:v 3 -y "$outputPath"';
+    final session = await FFmpegKit.execute(command);
+    final rc = await session.getReturnCode();
+
+    if (ReturnCode.isSuccess(rc) && await File(outputPath).exists()) {
+      final bytes = await File(outputPath).readAsBytes();
+      await File(outputPath).delete();
+      return bytes;
+    }
+    return null;
+  }
+
 
   void splitClip(TimelineItem clip, Duration globalPosition) {
     if (clip.type != TimelineItemType.video) return;
@@ -115,188 +202,188 @@ class ClipController extends ChangeNotifier {
     final localSplit = globalPosition - clip.startTime;
     if (localSplit <= Duration.zero || localSplit >= clip.duration) return;
 
-    // Left clip - shorten duration
-    final leftClip = TimelineItem(
+    final leftClip = clip.copyWith(
       id: const Uuid().v4(),
-      type: clip.type,
-      file: clip.file,
-      startTime: clip.startTime,
-      trimStart: clip.trimStart,
       duration: localSplit,
-      originalDuration: clip.originalDuration,
-      speed: clip.speed,
-      volume: clip.volume,
-      thumbnailBytes: clip.thumbnailBytes,
     );
 
-    // Right clip - shift startTime and trimStart
-    final rightClip = TimelineItem(
+    final rightClip = clip.copyWith(
       id: const Uuid().v4(),
-      type: clip.type,
-      file: clip.file,
       startTime: globalPosition,
       trimStart: clip.trimStart + localSplit,
       duration: clip.duration - localSplit,
-      originalDuration: clip.originalDuration,
-      speed: clip.speed,
-      volume: clip.volume,
-      thumbnailBytes: clip.thumbnailBytes,
     );
 
-    final index = _videoClips.indexWhere((c) => c.id == clip.id);
+    final index = _videoClips.indexOf(clip);
     if (index != -1) {
-      _videoClips.removeAt(index);
-      _videoClips.insert(index, leftClip);
-      _videoClips.insert(index + 1, rightClip);
+      _videoClips
+        ..removeAt(index)
+        ..insert(index, leftClip)
+        ..insert(index + 1, rightClip);
 
-      // Share the same controller for performance
       videoManager.shareController(clip.id, leftClip.id);
       videoManager.shareController(clip.id, rightClip.id);
-
-      // Optional: remove old controller if not shared elsewhere
-      // videoManager.removeController(clip.id);
     }
 
     _updateTotalDuration();
-    _selectedClipId = rightClip.id; // Auto-select the right part after split
-    _selectedClipType = rightClip.type;
-
+    selectClip(rightClip.id, rightClip.type);
+    _syncPreview(); // Force preview update after split
     notifyListeners();
   }
 
+
+  /// 🎯 CRITICAL: Update timeline total duration when clips change
   void _updateTotalDuration() {
-    double maxEnd = 0;
-    final allTracks = [videoClips, audioClips, textClips, overlayClips];
-    for (final track in allTracks) {
-      if (track.isEmpty) continue;
-      final trackEnd = track
-          .map((e) => (e.startTime.inSeconds + e.duration.inSeconds).toDouble())
-          .reduce(math.max);
-      if (trackEnd > maxEnd) maxEnd = trackEnd;
+    double maxEnd = 0.0;
+
+    final allClips = [
+      ..._videoClips,
+      ..._audioClips,
+      ..._textClips,
+      ..._overlayClips,
+      ..._stickerClips,
+    ];
+
+    if (allClips.isEmpty) {
+      timelineController.totalDuration = const Duration(seconds: 30);
+      return;
     }
-    timelineController.totalDuration = Duration(seconds: maxEnd.toInt());
+
+    // Find the longest clip end considering speed
+    for (final clip in allClips) {
+      final effectiveMs = clip.duration.inMilliseconds / clip.speed;
+      final clipEndMs = clip.startTime.inMilliseconds + effectiveMs;
+      if (clipEndMs > maxEnd) maxEnd = clipEndMs;
+    }
+
+    final newTotal = Duration(milliseconds: maxEnd.ceil());
+
+    // 🎯 Update timeline controller (master)
+    timelineController.totalDuration = newTotal;
   }
 
-  /// Add a video clip
   Future<void> addVideoClip(TimelineItem clip) async {
+    // ⛔ STOP playback immediately
+    videoManager.pause();
+
     _videoClips.add(clip);
     _sortClips(_videoClips);
 
     await videoManager.initializeController(clip);
+
+    // 🎯 Move playhead to clip start
+    timelineController.currentTime = clip.startTime;
+
+    // 🎯 Force preview sync (NO PLAY)
+    await videoManager.syncToPlayhead(timelineController.currentTime);
+
+    _updateTotalDuration();
     notifyListeners();
   }
 
-  /// Add an audio clip
+  void _syncPreview() {
+    videoManager.pause();
+    videoManager.syncToPlayhead(timelineController.currentTime);
+  }
 
   Future<void> addAudioClip(TimelineItem clip) async {
     _audioClips.add(clip);
     _sortClips(_audioClips);
-
     await audioManager.initializePlayer(clip);
 
+    // Generate waveform
     final tempDir = await getTemporaryDirectory();
     final waveFile = File('${tempDir.path}/wave_${clip.id}.wave');
-
     try {
       final stream = JustWaveform.extract(
         audioInFile: clip.file!,
         waveOutFile: waveFile,
       );
-
       await for (final progress in stream) {
         if (progress.waveform != null) {
           clip.waveformData = progress.waveform!;
-          notifyListeners(); // timeline repaint
+          notifyListeners(); // Update UI as waveform loads
         }
       }
     } catch (e) {
-      debugPrint('Waveform generation failed: $e');
+      debugPrint('Waveform failed: $e');
     }
 
+    _updateTotalDuration();
+    notifyListeners(); // ← This makes the audio clip appear immediately
+  }
+
+  void addTextClip(TimelineItem clip) {
+    _textClips.add(clip);
+    _sortClips(_textClips);
     _updateTotalDuration();
     notifyListeners();
   }
 
-  /// Add a text clip
-  void addTextClip(TimelineItem clip) {
-    _textClips.add(clip);
-    _sortClips(_textClips);
-    notifyListeners();
-  }
-
-  /// Add an overlay/image clip
   void addOverlayClip(TimelineItem clip) {
     _overlayClips.add(clip);
     _sortClips(_overlayClips);
+    _updateTotalDuration();
     notifyListeners();
   }
 
-  /// Update a clip
   void updateClip(TimelineItem updatedClip) {
     _updateInList(_videoClips, updatedClip);
     _updateInList(_audioClips, updatedClip);
     _updateInList(_textClips, updatedClip);
     _updateInList(_overlayClips, updatedClip);
+    _updateTotalDuration();
     notifyListeners();
   }
 
-  /// Delete a clip
   void deleteClip(String clipId, TimelineItemType type) {
     switch (type) {
       case TimelineItemType.video:
         _videoClips.removeWhere((c) => c.id == clipId);
         videoManager.removeController(clipId);
         break;
-
       case TimelineItemType.audio:
         _audioClips.removeWhere((c) => c.id == clipId);
         audioManager.removePlayer(clipId);
         break;
-
-      case TimelineItemType.image:
-        _overlayClips.removeWhere((c) => c.id == clipId);
-        break;
-
       case TimelineItemType.text:
         _textClips.removeWhere((c) => c.id == clipId);
         break;
-
       case TimelineItemType.overlay:
-        _overlayClips.removeWhere((c) => c.id == clipId);
-        break;
-
       case TimelineItemType.stickers:
+      case TimelineItemType.image:
         _overlayClips.removeWhere((c) => c.id == clipId);
         break;
+      case TimelineItemType.backgroundMusic:
+        removeBackgroundMusic();
+        return; // Early return — no need to deselect or update duration
+      case TimelineItemType.backgroundVisual:
+        removeBackgroundVisual();
+        return; // Early return
     }
 
+    // Only deselect if it wasn't background music/visual
     if (_selectedClipId == clipId) {
       _selectedClipId = null;
       _selectedClipType = null;
     }
 
+    _updateTotalDuration();
+    _syncPreview();
     notifyListeners();
   }
 
-  void replaceClip(String oldId, TimelineItem newClip) {
-    // Find and replace in correct list
-    // Then notifyListeners()
-  }
-
-  Future<void> detectBeats(TimelineItem audioClip) async {
-    // Simple beat detection using audio waveform peaks
-    // Placeholder: generate markers every 0.5-1s
-    final beats = <Duration>[];
-    for (double t = 0; t < audioClip.duration.inSeconds; t += 0.6) {
-      beats.add(Duration(seconds: t.toInt()));
-    }
-    // Store beats in audioClip.customData or separate list
-  }
-
-  /// Duplicate a clip
   void duplicateClip(TimelineItem clip) {
+    // Background music and background visual should NOT be duplicated
+    if (clip.type == TimelineItemType.backgroundMusic ||
+        clip.type == TimelineItemType.backgroundVisual) {
+      // Optionally show a message
+      // _showMessage('Background cannot be duplicated');
+      return;
+    }
+
     final newClip = clip.copyWith(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: const Uuid().v4(),
       startTime: clip.startTime + clip.duration,
     );
 
@@ -306,70 +393,48 @@ class ClipController extends ChangeNotifier {
         _sortClips(_videoClips);
         videoManager.shareController(clip.id, newClip.id);
         break;
-
       case TimelineItemType.audio:
         _audioClips.add(newClip);
         _sortClips(_audioClips);
         audioManager.initializePlayer(newClip);
         break;
-
       case TimelineItemType.text:
         _textClips.add(newClip);
         _sortClips(_textClips);
         break;
-
-      case TimelineItemType.image:
       case TimelineItemType.overlay:
       case TimelineItemType.stickers:
+      case TimelineItemType.image:
         _overlayClips.add(newClip);
         _sortClips(_overlayClips);
         break;
+      case TimelineItemType.backgroundMusic:
+      case TimelineItemType.backgroundVisual:
+      // Already handled above — do nothing
+        return;
     }
 
+    _updateTotalDuration();
+    _syncPreview();
     notifyListeners();
   }
 
-  /// Move a clip to a new position
   void moveClip(String clipId, TimelineItemType type, Duration newStartTime) {
-    TimelineItem? clip;
-
-    switch (type) {
-      case TimelineItemType.video:
-        clip = _videoClips.firstWhere((c) => c.id == clipId);
-        _sortClips(_videoClips);
-        break;
-
-      case TimelineItemType.audio:
-        clip = _audioClips.firstWhere((c) => c.id == clipId);
-        _sortClips(_audioClips);
-        break;
-
-      case TimelineItemType.text:
-        clip = _textClips.firstWhere((c) => c.id == clipId);
-        _sortClips(_textClips);
-        break;
-
-      case TimelineItemType.image:
-      case TimelineItemType.overlay:
-      case TimelineItemType.stickers:
-        clip = _overlayClips.firstWhere((c) => c.id == clipId);
-        _sortClips(_overlayClips);
-        break;
+    final clip = getClip(clipId);
+    if (clip != null) {
+      clip.startTime = newStartTime;
+      _updateTotalDuration();
+      _syncPreview();
+      notifyListeners();
     }
-
-    clip?.startTime = newStartTime;
-
-    notifyListeners();
   }
 
-  /// Select a clip
   void selectClip(String? clipId, TimelineItemType? type) {
     _selectedClipId = clipId;
     _selectedClipType = type;
     notifyListeners();
   }
 
-  /// Get clip by ID
   TimelineItem? getClip(String clipId) {
     for (final list in [_videoClips, _audioClips, _textClips, _overlayClips]) {
       try {
@@ -379,26 +444,11 @@ class ClipController extends ChangeNotifier {
     return null;
   }
 
-  /// Get clip at playhead position
-  TimelineItem? getClipAtPosition(Duration position) {
-    for (final list in [_videoClips, _audioClips, _textClips, _overlayClips]) {
-      for (final clip in list) {
-        if (position >= clip.startTime &&
-            position < clip.startTime + clip.duration) {
-          return clip;
-        }
-      }
-    }
-    return null;
-  }
-
-  /// Get active video clip at position
   TimelineItem? getActiveVideoClip(Duration position) {
     for (final clip in _videoClips) {
       final effectiveDuration = Duration(
         milliseconds: (clip.duration.inMilliseconds / clip.speed).round(),
       );
-
       if (position >= clip.startTime &&
           position < clip.startTime + effectiveDuration) {
         return clip;
@@ -407,12 +457,10 @@ class ClipController extends ChangeNotifier {
     return null;
   }
 
-  /// Helper: Sort clips by start time
   void _sortClips(List<TimelineItem> clips) {
     clips.sort((a, b) => a.startTime.compareTo(b.startTime));
   }
 
-  /// Helper: Update clip in list
   void _updateInList(List<TimelineItem> list, TimelineItem updated) {
     final index = list.indexWhere((c) => c.id == updated.id);
     if (index != -1) {
@@ -421,26 +469,68 @@ class ClipController extends ChangeNotifier {
     }
   }
 
-  // Get the currently selected clip (any type)
   TimelineItem? getSelectedClip() {
     if (selectedClipId == null || selectedClipType == null) return null;
-
-    switch (selectedClipType!) {
-      case TimelineItemType.video:
-        return videoClips.firstWhereOrNull((c) => c.id == selectedClipId);
-      case TimelineItemType.audio:
-        return audioClips.firstWhereOrNull((c) => c.id == selectedClipId);
-      case TimelineItemType.text:
-        return textClips.firstWhereOrNull((c) => c.id == selectedClipId);
-      case TimelineItemType.overlay:
-      case TimelineItemType.stickers:
-        return overlayClips.firstWhereOrNull((c) => c.id == selectedClipId);
-      default:
-        return null;
-    }
+    return getClip(selectedClipId!);
   }
 
-  /// Clear all clips
+  void replaceClip(String oldClipId, TimelineItem newClip) {
+    TimelineItem? oldClip;
+
+    if (_videoClips.any((c) => c.id == oldClipId)) {
+      final index = _videoClips.indexWhere((c) => c.id == oldClipId);
+      oldClip = _videoClips[index];
+      _videoClips[index] = newClip;
+    } else if (_audioClips.any((c) => c.id == oldClipId)) {
+      final index = _audioClips.indexWhere((c) => c.id == oldClipId);
+      oldClip = _audioClips[index];
+      _audioClips[index] = newClip;
+    } else if (_overlayClips.any((c) => c.id == oldClipId)) {
+      final index = _overlayClips.indexWhere((c) => c.id == oldClipId);
+      oldClip = _overlayClips[index];
+      _overlayClips[index] = newClip;
+    } else if (_textClips.any((c) => c.id == oldClipId)) {
+      final index = _textClips.indexWhere((c) => c.id == oldClipId);
+      oldClip = _textClips[index];
+      _textClips[index] = newClip;
+    }
+
+    if (oldClip != null) {
+      if (oldClip.type == TimelineItemType.video &&
+          newClip.type == TimelineItemType.video) {
+        videoManager.shareController(oldClip.id, newClip.id);
+      }
+
+      if (newClip.type == TimelineItemType.video) {
+        videoManager.initializeController(newClip);
+      } else if (newClip.type == TimelineItemType.audio) {
+        audioManager.initializePlayer(newClip);
+      }
+
+      if (_selectedClipId == oldClipId) {
+        _selectedClipId = newClip.id;
+        _selectedClipType = newClip.type;
+      }
+    }
+
+    _updateTotalDuration();
+    notifyListeners();
+  }
+
+
+  List<TimelineItem> getActiveVideoStack(Duration position) {
+    final videos = videoClips.where((clip) {
+      final effectiveDuration = Duration(
+        milliseconds: (clip.duration.inMilliseconds / clip.speed).round(),
+      );
+      final end = clip.startTime + effectiveDuration;
+      return position >= clip.startTime && position < end;
+    }).toList();
+
+    videos.sort((a, b) => a.layerIndex.compareTo(b.layerIndex));
+    return videos;
+  }
+
   void clearAll() {
     _videoClips.clear();
     _audioClips.clear();
@@ -448,6 +538,7 @@ class ClipController extends ChangeNotifier {
     _overlayClips.clear();
     _selectedClipId = null;
     _selectedClipType = null;
+    _updateTotalDuration();
     notifyListeners();
   }
 }

@@ -3,14 +3,19 @@ import 'dart:typed_data';
 
 import 'package:extended_image/extended_image.dart' as http;
 import 'package:ffmpeg_kit_min_gpl/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_min_gpl/ffmpeg_kit_config.dart';
 import 'package:ffmpeg_kit_min_gpl/return_code.dart';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
+import 'package:video_editor_2/domain/bloc/controller.dart';
 import 'package:video_player/video_player.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
+import 'package:cross_file/cross_file.dart';
+
+
 
 // Controllers
 
@@ -20,11 +25,14 @@ import '../servuices/audio_manager.dart';
 import '../servuices/clip_controller.dart';
 import '../servuices/playback_controller.dart';
 import '../servuices/time_line_controller.dart';
+import '../servuices/video_exporter.dart';
 import '../servuices/video_manager.dart';
 import '../widgets/animation_sheet.dart';
 import '../widgets/audio_library_sheet.dart';
 import '../widgets/auto_caption_sheet.dart';
+import '../widgets/background_sheet.dart';
 import '../widgets/context_toolbar.dart';
+import '../widgets/crop_screen.dart';
 import '../widgets/effect_tile.dart';
 import '../widgets/effects_sheet.dart';
 import '../widgets/play_back_controls.dart';
@@ -64,9 +72,13 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
   late TimelineController timelineController;
   late ClipController clipController;
 
+
   // UI State
   BottomNavMode _currentNavMode = BottomNavMode.normal;
   bool _isInitializing = false;
+
+  // Editor tools
+   VideoEditorController? _cropController;
 
   // Project Info
   late String projectId;
@@ -82,31 +94,40 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
 
     _initializeControllers();
 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      videoManager.forceFrameAt(timelineController.currentTime);
+    });
+
     if (widget.initialVideos?.isNotEmpty == true) {
       WidgetsBinding.instance.addPostFrameCallback(
-        (_) => _processInitialVideos(),
+            (_) => _processInitialVideos(),
       );
     }
   }
 
   void _initializeControllers() {
-    videoManager = VideoManager();
     audioManager = AudioManager();
-
-    playbackController = PlaybackController(
-      videoManager: videoManager,
-      audioManager: audioManager,
-    );
-
     timelineController = TimelineController();
 
+    // Initialize clipController without videoManager
     clipController = ClipController(
-      videoManager: videoManager,
       audioManager: audioManager,
       timelineController: timelineController,
     );
 
-    // Listen to controllers
+    // Initialize videoManager with clipController
+    videoManager = VideoManager(clipController: clipController, timelineController: timelineController);
+
+    // Set videoManager in clipController
+    clipController.setVideoManager(videoManager);
+
+    // Initialize playbackController
+    playbackController = PlaybackController(
+      videoManager: videoManager,
+      audioManager: audioManager,
+      timelineController: timelineController,
+      clipController: clipController,
+    );
   }
 
   Future<void> _processInitialVideos() async {
@@ -129,17 +150,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
         }
       }
 
-      // Switch to first clip
       if (clipController.videoClips.isNotEmpty) {
-        final firstClip = clipController.videoClips.first;
-        await videoManager.switchToClip(
-          firstClip,
-          playheadPosition: Duration.zero,
-          isPlaying: false,
-        );
+        timelineController.currentTime = Duration.zero;
+        await videoManager.forceFrameAt(Duration.zero);
       }
     } catch (e) {
-      debugPrint('❌ Error loading videos: $e');
+      debugPrint('Error loading videos: $e');
       _showError('Failed to load videos');
     } finally {
       if (mounted) setState(() => _isInitializing = false);
@@ -149,7 +165,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
   Future<TimelineItem?> _createVideoItemFromFile(
     XFile file, {
     Duration startTime = Duration.zero,
-  }) async {
+  })
+  async {
     try {
       final path = file.path;
       final fileObj = File(path);
@@ -163,7 +180,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
       // 2. Generate thumbnails with fallback
       List<Uint8List> thumbs = [];
       try {
-        thumbs = await clipController.generateRobustThumbnails(path, duration);
+        final pixelsPerSecond = timelineController.pixelsPerSecond;
+
+        thumbs = await clipController.generateTimelineThumbnails(
+          videoPath: path,
+          duration: duration,
+          pixelsPerSecond: pixelsPerSecond,
+        );
+
       } catch (e) {
         debugPrint('FFmpeg thumbnail failed: $e, using fallback...');
         thumbs = await _generateFallbackThumbnails(path, duration);
@@ -189,7 +213,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
   Future<List<Uint8List>> _generateFallbackThumbnails(
     String videoPath,
     Duration duration,
-  ) async {
+  )
+  async {
     final List<Uint8List> thumbs = [];
     const int count = 12;
     final int safeStartMs = 800; // Skip first 0.8s (avoids black frame)
@@ -272,75 +297,94 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
               onHelp: () => _showMessage('Help coming soon'),
             ),
 
-            // 2. Preview
+            // 2. Preview — 65% of height
             Expanded(
+              flex: 7,
               child: AnimatedBuilder(
-                animation: Listenable.merge([
-                  clipController,
-                  playbackController,
-                ]),
-                builder:
-                    (_, __) => VideoPreview(
-                      videoManager: videoManager,
-                      clipController: clipController,
-                      playheadPosition: playbackController.playheadPosition,
-                    ),
+                animation: Listenable.merge([clipController, timelineController]),
+                builder: (_, __) => VideoPreview(
+                  videoManager: videoManager,
+                  clipController: clipController,
+                  playheadPosition: timelineController.currentTime,
+                ),
               ),
             ),
 
+
             // 3. Playback Controls
             AnimatedBuilder(
-              animation: playbackController,
+              animation: Listenable.merge([timelineController, playbackController]),  // ← Add playbackController
               builder: (_, __) {
                 return PlaybackControls(
                   isPlaying: playbackController.isPlaying,
-                  playheadPosition: playbackController.playheadPosition,
-                  totalDuration: _getTotalDuration(),
-                  onPlayPause: _handlePlayPause,
+                  playheadPosition: timelineController.currentTime,
+                  totalDuration: timelineController.totalDuration,
+                  onPlayPause: playbackController.togglePlayPause,
                   onUndo: _handleUndo,
                   onRedo: _handleRedo,
                 );
               },
             ),
 
-            // 4. Timeline
-            AnimatedBuilder(
-              animation: Listenable.merge([
-                timelineController,
-                clipController,
-                playbackController,
-              ]),
-              builder:
-                  (_, __) => TimelineView(
-                    controller: timelineController,
-                    clipController: clipController,
-                    playheadPosition: playbackController.playheadPosition,
-                    isPlaying: playbackController.isPlaying,
-                    onTimelineTap: _handleTimelineTap,
-                    onClipSelected: _handleClipSelected,
-                  ),
+            // if (timelineController.shouldShowVideoTrack())
+            //   Align(
+            //     alignment: Alignment.centerRight,
+            //     child: Padding(
+            //       padding: const EdgeInsets.only(right: 20),
+            //       child: FloatingActionButton(
+            //         backgroundColor: const Color(0xFF00D9FF),
+            //         elevation: 8,
+            //         child: const Icon(Icons.add, color: Colors.black, size: 32),
+            //         onPressed: () {
+            //           debugPrint('Add new video clip');
+            //           // TODO: Open picker
+            //         },
+            //       ),
+            //     ),
+            //   ),
+            // 4. Timeline — compact
+            SizedBox(
+
+              child: AnimatedBuilder(
+                animation: Listenable.merge([timelineController, clipController]),
+                builder: (_, __) => TimelineView(
+                  controller: timelineController,
+                  clipController: clipController,
+                  videoManager: videoManager,
+                  playheadPosition: timelineController.currentTime,
+                  isPlaying: playbackController.isPlaying,
+                  onTimelineTap: (offset) {
+                    final newPos = timelineController.handleTimelineTap(
+                      offset,
+                      MediaQuery.of(context).size.width,
+                    );
+                    playbackController.seekTo(newPos);
+                  },
+                  onClipSelected: _handleClipSelected,
+                ),
+              ),
             ),
 
-            // 5. Context Toolbar (only when in mode)
+
+
+            // 5. Context Toolbar
             if (_currentNavMode != BottomNavMode.normal)
               ContextToolbar(
                 mode: _currentNavMode,
                 onSplit: _handleSplit,
-                onSound:
-                    () => _showAudioLibrarySheet(
-                      playbackController.playheadPosition,
-                    ),
+                onSound: () => _showAudioLibrarySheet(timelineController.currentTime),
                 onSoundFX: _handleOpenSoundFX,
                 onRecord: _handleRecordVoiceover,
                 onTextToAudio: _handleTextToAudio,
                 onExtract: _handleExtractAudio,
-                onAddText: _handleAddText, // ← ADD THESE
+                 onAddText: _addText,
+                  onAddOverlay: _addImageOverlay,
                 onAutoCaption: _handleAutoCaption,
                 onStickers: _handleStickers,
                 onApplyFilter: (filter) => clipController.applyFilter(filter),
                 onEffects: _handleEffects,
                 onVolume: _handleVolume,
-                onAnimation: _handleAnimation,
+                onAnimation: _openAnimationSheet,
                 onEffect: _handleEffect,
                 onDelete: _handleDelete,
                 onSpeed: _handleSpeed,
@@ -349,7 +393,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
                 onDuplicate: _handleDuplicate,
                 onReplace: _handleReplace,
                 onAdjust: _handleAdjust,
-              ),
+                onBackgroundMusic: () => _handleBackgroundMusic,
+                onBackground: () => _handleBackgroundVisual
+                ),
+
+
+
             // 6. Bottom Navigation
             BottomNav(
               currentMode: _currentNavMode,
@@ -361,37 +410,38 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     );
   }
 
+  void _handleBackgroundMusic() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => AudioLibrarySheet(
+
+        insertPosition: timelineController.currentTime,
+      ),
+    );
+  }
+
   void _showAudioLibrarySheet(Duration position) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder:
-          (_) => AudioLibrarySheet(
-            clipController: clipController,
-            audioManager: audioManager,
-            insertPosition: position,
-          ),
+      builder: (_) => AudioLibrarySheet(
+        insertPosition: position,
+      ),
     );
   }
 
-  Future<void> _handlePlayPause() async {
-    await playbackController.togglePlayPause(
-      clips: clipController.videoClips,
-      audioItems: clipController.audioClips,
-    );
-  }
-
-  void _handleTimelineTap(Offset position) {
-    final newPosition = timelineController.handleTimelineTap(
-      position,
-      MediaQuery.of(context).size.width,
-    );
-
-    playbackController.seekTo(
-      newPosition,
-      clips: clipController.videoClips,
-      audioItems: clipController.audioClips,
+  void _handleBackgroundVisual() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => BackgroundSheet(
+        clipController: clipController,
+        videoManager: videoManager,
+      ),
     );
   }
 
@@ -402,8 +452,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
   void _handleNavModeChanged(BottomNavMode mode) {
     setState(() {
       _currentNavMode = mode;
-
-      // Update timeline display mode
       switch (mode) {
         case BottomNavMode.audio:
           timelineController.setDisplayMode(TimelineDisplayMode.videoAudioOnly);
@@ -412,27 +460,14 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
           timelineController.setDisplayMode(TimelineDisplayMode.videoTextOnly);
           break;
         case BottomNavMode.overlay:
-          timelineController.setDisplayMode(
-            TimelineDisplayMode.videoOverlayOnly,
-          );
+          timelineController.setDisplayMode(TimelineDisplayMode.videoOverlayOnly);
           break;
         case BottomNavMode.edit:
           timelineController.setDisplayMode(TimelineDisplayMode.allTracks);
-          // Auto-select current video clip
-          final currentClip = clipController.getActiveVideoClip(
-            playbackController.playheadPosition,
-          );
+          final currentClip = clipController.getActiveVideoClip(timelineController.currentTime);
           if (currentClip != null) {
             clipController.selectClip(currentClip.id, currentClip.type);
-          }
-          if (currentClip != null) {
-            clipController.selectClip(currentClip.id, currentClip.type);
-            // Optional: Seek to start of clip for easy editing
-            playbackController.seekTo(
-              currentClip.startTime,
-              clips: clipController.videoClips,
-              audioItems: clipController.audioClips,
-            );
+            playbackController.seekTo(currentClip.startTime);
           }
           break;
         default:
@@ -454,39 +489,21 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     final outputPath =
         '${tempDir.path}/export_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-    _showMessage('Exporting...');
+    _showMessage('Exporting…');
 
-    // Build complex FFmpeg command
-    String command = '-i "${clipController.videoClips.first.file!.path}"';
+    try {
+      final file = await VideoExporter.export(
+        videoClips: clipController.videoClips,
+        audioClips: clipController.audioClips,
+        textClips: clipController.textClips,
+        outputPath: outputPath,
+      );
 
-    // Add audio tracks
-    for (var audio in clipController.audioClips) {
-      command += ' -i "${audio.file!.path}"';
-    }
-
-    // Filter complex for overlays, text, effects
-    String filter = '[0:v]';
-
-    if (clipController.currentFilter != 'none') {
-      // Apply filter
-    }
-
-    // Add text/overlays as images or drawtext
-    // Simplified: burn text in
-    for (var text in clipController.textClips) {
-      command +=
-          ' -vf "drawtext=text=\'${text.text}\':fontcolor=white:fontsize=40:x=100:y=200"';
-    }
-
-    command += ' -c:v libx264 -preset fast -crf 23 "$outputPath"';
-
-    final session = await FFmpegKit.execute(command);
-
-    if (await session.getReturnCode().then((rc) => ReturnCode.isSuccess(rc))) {
-      // Save to gallery (use gallery_saver package)
       _showMessage('Exported successfully!');
-    } else {
+      debugPrint('Saved to: ${file.path}');
+    } catch (e) {
       _showMessage('Export failed');
+      debugPrint('Export error: $e');
     }
   }
 
@@ -507,8 +524,12 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     );
     if (clip != null) {
       clipController.splitClip(clip, playbackController.playheadPosition);
+      videoManager.refreshCurrentFrame(); // Fix after pause
+    } else {
+      _showMessage('No clip at playhead');
     }
   }
+
 
   void _handleDelete() {
     if (clipController.selectedClipType == TimelineItemType.video &&
@@ -520,25 +541,9 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     }
   }
 
-  void _handleOpenMusicLibrary() =>
-      _showAudioLibrarySheet(playbackController.playheadPosition);
   void _handleOpenSoundFX() => _showSoundFXSheet();
   void _handleRecordVoiceover() => _showVoiceRecorder();
   void _handleTextToAudio() => _showTextToAudioSheet();
-  void _handleEditText() => _showMessage('Edit text coming soon');
-
-  // Helpers
-  Duration _getTotalDuration() {
-    return Duration(
-      seconds:
-          playbackController.getTotalDuration([
-            clipController.videoClips,
-            clipController.audioClips,
-            clipController.textClips,
-            clipController.overlayClips,
-          ]).toInt(),
-    );
-  }
 
   Future<bool> _confirmUnsavedChanges() async {
     // Simplified - would check autosave manager
@@ -657,42 +662,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     }
   }
 
-  void _handleAddText() {
-    // Auto-add blank editable text
-    final blankText = TimelineItem(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      type: TimelineItemType.text,
-      startTime: playbackController.playheadPosition,
-      duration: const Duration(seconds: 5),
-      originalDuration: const Duration(seconds: 5),
-      text: 'Tap to edit',
-      textColor: Colors.white,
-      fontSize: 40.0,
-      x: 100.0,
-      y: 200.0,
-      scale: 1.0,
-      rotation: 0.0,
-    );
-
-    clipController.addTextClip(blankText);
-
-    // Open text editor sheet
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder:
-          (_) => TextBottomSheet(
-            onApply: (newText, style) {
-              final lastText = clipController.textClips.last;
-              lastText.text = newText;
-              // Apply style here (color, font, etc.)
-              clipController.updateClip(lastText);
-            },
-          ),
-    );
-  }
-
   void _handleAutoCaption() {
     showModalBottomSheet(
       context: context,
@@ -752,61 +721,60 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
   }
 
   void _handleVolume() {
-    final clip = clipController.getSelectedClip(); // ← Now works
+    final clip = clipController.getSelectedClip();
     if (clip == null) return;
 
     double currentVol = clip.volume ?? 1.0;
 
     showModalBottomSheet(
       context: context,
-      builder:
-          (_) => Container(
-            height: 200,
-            color: Color(0xFF1A1A1A),
-            child: Column(
-              children: [
-                Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Text(
-                    'Volume',
-                    style: TextStyle(color: Colors.white, fontSize: 18),
-                  ),
-                ),
-                Slider(
-                  value: currentVol,
-                  min: 0.0,
-                  max: 2.0,
-                  onChanged: (v) {
-                    setState(() => currentVol = v);
-                    clip.volume = v;
-                    clipController.updateClip(clip);
-                    audioManager.setVolume(clip.id, v);
-                  },
-                ),
-                Text(
-                  '${(currentVol * 100).round()}%',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ],
+      builder: (_) => Container(
+        height: 200,
+        color: const Color(0xFF1A1A1A),
+        child: Column(
+          children: [
+            Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Volume', style: TextStyle(color: Colors.white, fontSize: 18)),
             ),
-          ),
+            Slider(
+              value: currentVol,
+              min: 0.0,
+              max: 2.0,
+              onChanged: (v) {
+                setState(() => currentVol = v);
+                clip.volume = v;
+                clipController.updateClip(clip);
+                // CRITICAL: Apply to controller immediately
+                final controller = videoManager.getController(clip.id);
+                if (controller != null) {
+                  controller.setVolume(v);
+                }
+                audioManager.setVolume(clip.id, v); // For audio clips
+              },
+            ),
+            Text('${(currentVol * 100).round()}%', style: TextStyle(color: Colors.white)),
+          ],
+        ),
+      ),
     );
   }
 
-  void _handleAnimation() {
+
+  void _openAnimationSheet() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder:
-          (_) => AnimationSheet(
-            onApply: (anim) {
-              final clip = clipController.getSelectedClip(); // ← Now works
-              if (clip != null) {
-                clip.animationIn = anim;
-                clipController.updateClip(clip);
-              }
-            },
-          ),
+      backgroundColor: Colors.transparent,
+      builder: (_) => AnimationSheet(
+        onApply: (animationName) {
+          final selected = clipController.getSelectedClip();
+          if (selected != null) {
+            selected.animation = animationName; // ← Save animation name
+            clipController.updateClip(selected);
+          }
+        },
+      ),
     );
   }
 
@@ -941,24 +909,6 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     );
   }
 
-  Widget _slider(
-    String label,
-    double value,
-    double min,
-    double max,
-    Function(double) onChange,
-  ) {
-    return Slider(
-      value: value,
-      min: min,
-      max: max,
-      onChanged: (v) {
-        onChange(v);
-        clipController.updateClip(clipController.getSelectedClip()!);
-      },
-      label: label,
-    );
-  }
 
   void _handleBeats() {
     showModalBottomSheet(
@@ -977,25 +927,28 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
     );
   }
 
-  void _handleCrop() {
+  void _handleCrop() async {
     final clip = clipController.getSelectedClip();
-    if (clip == null || clip.type != TimelineItemType.video) return;
+    if (clip == null || clip.type != TimelineItemType.video || clip.file == null) {
+      _showMessage('Please select a video clip');
+      return;
+    }
 
-    showModalBottomSheet(
-      context: context,
-      builder:
-          (_) => Container(
-            height: 400,
-            color: Color(0xFF1A1A1A),
-            child: Column(
-              children: [
-                Text('Crop Video'),
-                // Sliders for left/top/right/bottom or aspect ratio presets
-                // Update clip.cropLeft etc.
-              ],
-            ),
-          ),
+    final saved = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CropScreen(
+          videoFile: clip.file!,
+          clip: clip,
+        ),
+      ),
     );
+
+    if (saved == true) {
+      clipController.updateClip(clip);
+      videoManager.refreshCurrentFrame(); // Force preview update
+      _showMessage('Crop applied!');
+    }
   }
 
   void _handleReplace() {
@@ -1014,6 +967,63 @@ class _VideoEditorScreenState extends State<VideoEditorScreen> {
       }
     });
   }
+
+  void _addImageOverlay() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+
+    final file = File(picked.path);
+
+    final overlay = TimelineItem(
+      id: const Uuid().v4(),
+      type: TimelineItemType.overlay,
+      file: file,
+      startTime: timelineController.currentTime, // ← Correct: current playhead
+      duration: const Duration(seconds: 5),
+      originalDuration: const Duration(seconds: 5),
+      x: 100.0,
+      y: 100.0,
+      scale: 1.0,
+      rotation: 0.0,
+    );
+
+    clipController.addOverlayClip(overlay);
+  }
+
+  void _addText() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => TextBottomSheet(
+        onApply: (text, style) {
+          final textItem = TimelineItem(
+            id: const Uuid().v4(),
+            type: TimelineItemType.text,
+            text: text,
+            textColor: Color(int.parse(style['color'].replaceFirst('#', '0xFF'))),
+            fontFamily: style['font'],
+            animation: style['animation'],
+            shadowColor: style['shadowColor'] != null ? Color(int.parse(style['shadowColor'], radix: 16)) : null,
+            shadowBlur: style['shadowBlur'],
+            strokeWidth: style['strokeWidth'],
+            strokeColor: style['strokeColor'] != null ? Color(int.parse(style['strokeColor'], radix: 16)) : null,
+            startTime: timelineController.currentTime,
+            duration: const Duration(seconds: 5),
+            x: 100.0,
+            y: 200.0,
+            scale: 1.0,
+            rotation: 0.0,
+          );
+
+          clipController.addTextClip(textItem);
+          Navigator.pop(context);
+        },
+      ),
+    );
+  }
+
 }
 
 // Bottom Navigation Modes

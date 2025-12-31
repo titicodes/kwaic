@@ -1,19 +1,32 @@
 
-
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:kwaic/nes_scr/servuices/playback_controller.dart';
 import '../model/timeline_item.dart';
 
+/// TimelineController - The MASTER time source
+/// All time flows through here. Preview is a slave that follows.
 class TimelineController extends ChangeNotifier {
   final ScrollController scrollController = ScrollController();
+
   double _pixelsPerSecond = 90.0;
   final double _minPixelsPerSecond = 40.0;
   final double _maxPixelsPerSecond = 420.0;
   double _timelineOffset = 0.0;
+
   TimelineDisplayMode _displayMode = TimelineDisplayMode.allTracks;
   bool _isTrimMode = false;
   String? _trimClipId;
   bool _trimAtStart = false;
-  Duration _totalDuration = const Duration(seconds: 60);
+
+  // 🎯 MASTER CURRENT TIME — single source of truth
+  Duration _currentTime = Duration.zero;
+
+  // 🎯 REAL TOTAL DURATION — calculated from longest clip + speed
+  Duration _totalDuration = const Duration(seconds: 30);
+
+  // Track if time was changed externally (for preventing loops)
+  bool _isUpdatingTime = false;
 
   TimelineController() {
     scrollController.addListener(() {
@@ -22,16 +35,20 @@ class TimelineController extends ChangeNotifier {
     });
   }
 
-  List<TimelineItem> clips = [];
-  String? selectedClipId;
-  TimelineItemType? selectedClipType;
+// 🎯 MAIN currentTime setter — single source of truth
+  set currentTime(Duration value) {
+    if (_isUpdatingTime) return;
 
-  void selectClip(String? clipId, TimelineItemType? type) {
-    selectedClipId = clipId;
-    selectedClipType = type;
-    notifyListeners();
+    final clamped = value.clamp(Duration.zero, _totalDuration);
+    if (_currentTime != clamped) {
+      _isUpdatingTime = true;
+      _currentTime = clamped;
+      notifyListeners();  // Always notify — PlaybackController will control quiet updates
+      _isUpdatingTime = false;
+    }
   }
 
+  // Getters
   double get pixelsPerSecond => _pixelsPerSecond;
   double get timelineOffset => _timelineOffset;
   TimelineDisplayMode get displayMode => _displayMode;
@@ -39,66 +56,65 @@ class TimelineController extends ChangeNotifier {
   String? get trimClipId => _trimClipId;
   bool get trimAtStart => _trimAtStart;
   Duration get totalDuration => _totalDuration;
+  Duration get currentTime => _currentTime;
 
+  // 🎯 Setter for totalDuration — clips update this
   set totalDuration(Duration value) {
-    _totalDuration = value;
-    notifyListeners();
+    if (_totalDuration != value) {
+      _totalDuration = value;
+      // Clamp current time if it exceeds new total
+      if (_currentTime > _totalDuration) {
+        _currentTime = _totalDuration;
+      }
+      notifyListeners();
+    }
   }
 
-  Duration handleTimelineTap(
-      Offset tapPosition,
-      double screenWidth,
-      ) {
+  // 🎯 Update time without notifying (used during playback to reduce overhead)
+  void updateTimeQuietly(Duration value) {
+    final clamped = value.clamp(Duration.zero, _totalDuration);
+    if (_currentTime != clamped) {
+      _currentTime = clamped;
+      // Don't call notifyListeners() — let the playback loop handle it
+    }
+  }
+
+  // 🎯 Tap → update master time
+  Duration handleTimelineTap(Offset tapPosition, double screenWidth) {
     final centerX = screenWidth / 2;
     final tapX = tapPosition.dx;
     final seconds = (_timelineOffset + tapX - centerX) / _pixelsPerSecond;
-    final safe = Duration(
-        milliseconds: (seconds.clamp(0, totalDuration.inSeconds) * 1000).round()
+    final newTime = Duration(
+      milliseconds: (seconds.clamp(0, totalDuration.inSeconds) * 1000).round(),
     );
-    return safe;
-  }
-
-  Duration handleTimelineDrag(
-      double deltaPx,
-      Duration currentPosition,
-      ) {
-    final deltaSec = deltaPx / _pixelsPerSecond;
-    final newPos = currentPosition + Duration(milliseconds: (deltaSec * 1000).round());
-    return newPos.clamp(
-      Duration.zero,
-      totalDuration,
-    );
+    currentTime = newTime;
+    return newTime;
   }
 
   void handleZoom(double scale) {
     final newValue = (_pixelsPerSecond * scale)
         .clamp(_minPixelsPerSecond, _maxPixelsPerSecond);
-    _pixelsPerSecond = newValue;
-    notifyListeners();
+    if (_pixelsPerSecond != newValue) {
+      _pixelsPerSecond = newValue;
+      notifyListeners();
+    }
   }
 
-  void scrollToTime(
-      Duration time,
-      double screenWidth, {
-        bool animate = false,
-      }) {
+  void scrollToTime(Duration time, double screenWidth, {bool animate = false}) {
     if (!scrollController.hasClients) return;
 
     final centerX = screenWidth / 2;
     final targetOffset = (time.inMilliseconds / 1000 * _pixelsPerSecond) - centerX;
-    final clampedOffset = targetOffset.clamp(
-      0.0,
-      scrollController.position.maxScrollExtent,
-    );
+    final clamped = targetOffset.clamp(0.0, scrollController.position.maxScrollExtent);
 
     if (animate) {
       scrollController.animateTo(
-        clampedOffset,
-        duration: const Duration(milliseconds: 180),  // Smooth follow
+        clamped,
+        duration: const Duration(milliseconds: 180),
         curve: Curves.easeOutCubic,
       );
     } else {
-      scrollController.jumpTo(clampedOffset);
+      scrollController.jumpTo(clamped);
     }
   }
 
@@ -131,27 +147,6 @@ class TimelineController extends ChangeNotifier {
     _trimClipId = null;
     _trimAtStart = false;
     notifyListeners();
-  }
-
-  void setTrimSide(bool isStart) {
-    _trimAtStart = isStart;
-    notifyListeners();
-  }
-
-  // Helpers to compute clip metrics for UI
-  double getClipWidth(TimelineItem clip) {
-    final seconds = clip.duration.inMilliseconds / 1000 / clip.speed;
-    return (seconds * _pixelsPerSecond).clamp(50, double.infinity);
-  }
-
-  double getClipPosition(
-      TimelineItem clip,
-      double screenWidth,
-      ) {
-    final centerX = screenWidth / 2;
-    return clip.startTime.inMilliseconds / 1000 * _pixelsPerSecond -
-        _timelineOffset +
-        centerX;
   }
 
   @override

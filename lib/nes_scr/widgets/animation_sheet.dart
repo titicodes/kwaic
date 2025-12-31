@@ -1,10 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:lottie/lottie.dart';
 
-/// Bottom sheet for selecting animation effects (In, Out, Combo).
-///
-/// This uses flutter_animate for robust and declarative animation definitions,
-/// with manual control for the GridView preview tiles.
 class AnimationSheet extends StatefulWidget {
   final Function(String anim) onApply;
 
@@ -16,30 +13,27 @@ class AnimationSheet extends StatefulWidget {
 
 class _AnimationSheetState extends State<AnimationSheet>
     with TickerProviderStateMixin {
-  // Define the animation names based on the flutter_animate package effects
   final List<String> inAnims = ['fadeIn', 'slideInLeft', 'zoomIn'];
   final List<String> outAnims = ['fadeOut', 'slideOutRight', 'zoomOut'];
-  final List<String> comboAnims = ['bounce', 'elastic']; // Renamed 'bounceInOut' and 'elastic' for cleaner names
+  final List<String> comboAnims = ['bounce', 'elastic'];
 
-  // Map to store AnimationController for each tile, keyed by animation name.
-  final Map<String, AnimationController> _controllers = {};
-
-  @override
-  void dispose() {
-    // Crucial: Dispose all controllers when the sheet is closed.
-    _controllers.values.forEach((controller) => controller.dispose());
-    super.dispose();
-  }
+  final List<Map<String, dynamic>> _onlineAnims = [
+    {'name': 'Confetti', 'url': 'https://assets9.lottiefiles.com/packages/lf20_7q4l4t.json'},
+    {'name': 'Fireworks', 'url': 'https://assets10.lottiefiles.com/packages/lf20_1j5j0q.json'},
+    {'name': 'Heart Burst', 'url': 'https://assets8.lottiefiles.com/packages/lf20_1j5j0q.json'},
+    {'name': 'Sparkle', 'url': 'https://assets4.lottiefiles.com/packages/lf20_1j5j0q.json'},
+    {'name': 'Star Explosion', 'url': 'https://assets3.lottiefiles.com/packages/lf20_1j5j0q.json'},
+  ];
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Container(
         height: MediaQuery.of(context).size.height * 0.55,
-        decoration: BoxDecoration(
-          color: const Color(0xFF1A1A1A),
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        decoration: const BoxDecoration(
+          color: Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
         child: Column(
           children: [
@@ -56,8 +50,9 @@ class _AnimationSheetState extends State<AnimationSheet>
                         filled: true,
                         fillColor: Colors.grey[800],
                         border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(30),
-                            borderSide: BorderSide.none),
+                          borderRadius: BorderRadius.circular(30),
+                          borderSide: BorderSide.none,
+                        ),
                       ),
                     ),
                   ),
@@ -68,7 +63,6 @@ class _AnimationSheetState extends State<AnimationSheet>
                 ],
               ),
             ),
-            // Custom TabBar styling for CapCut aesthetic
             const TabBar(
               indicatorColor: Color(0xFF00D9FF),
               labelColor: Colors.white,
@@ -77,6 +71,7 @@ class _AnimationSheetState extends State<AnimationSheet>
                 Tab(text: 'In'),
                 Tab(text: 'Out'),
                 Tab(text: 'Combo'),
+                Tab(text: 'Online'),
               ],
             ),
             Expanded(
@@ -85,6 +80,7 @@ class _AnimationSheetState extends State<AnimationSheet>
                   _animGrid(inAnims),
                   _animGrid(outAnims),
                   _animGrid(comboAnims),
+                  _buildOnlineGrid(),
                 ],
               ),
             ),
@@ -105,134 +101,123 @@ class _AnimationSheetState extends State<AnimationSheet>
       ),
       itemCount: anims.length,
       itemBuilder: (_, i) {
-        String anim = anims[i];
-
-        // FIX: Remove 'const' to allow the use of the .ms extension method.
-        final duration = 800.ms;
-
-        // 1. Define the base widget to be animated
-        final textWidget = Center(
-          child: Text(
-            anim,
-            style: const TextStyle(color: Colors.white, fontSize: 12),
-          ),
-        );
-
-        // 2. Define the animation chain based on the effect name
-        Widget animatedWidget;
-
-        // Get the stored controller reference (will be null on first build)
-        final controller = _controllers[anim];
-
-        // IMPORTANT: Chain the effects using the flutter_animate extension methods.
-        // We use autoPlay: false here because we control it manually later.
-        switch (anim) {
-          case 'fadeIn':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-                .fadeIn(duration: duration, curve: Curves.easeIn);
-            break;
-
-          case 'slideInLeft':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-            // FIX CHECK: 'begin' takes a constant Offset, which is correct.
-                .slide(
-              begin: const Offset(-0.8, 0),
-              duration: duration,
-              curve: Curves.easeOutCubic,
-            ).fadeIn(duration: 200.ms);
-            break;
-          case 'zoomIn':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-                .scale(
-              begin: Offset(0.5, 0.5),  // Using Offset for scaling (0.5 is the scale factor for both X and Y axes)
-              end: Offset(1.0, 1.0),    // Ending scale (1.0 means normal size)
-              duration: duration,
-              curve: Curves.easeOutBack,
-            )
-                .fadeIn(duration: 200.ms);
-            break;
-
-          case 'fadeOut':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-                .fadeOut(duration: duration, curve: Curves.easeOut);
-            break;
-
-          case 'slideOutRight':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-            // FIX CHECK: 'end' takes a constant Offset, which is correct.
-                .slide(
-              end: const Offset(0.8, 0),
-              duration: duration,
-              curve: Curves.easeInCubic,
-            ).fadeOut(duration: 200.ms);
-            break;
-
-          case 'zoomOut':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-                .scale(
-              begin: Offset(1.0, 1.0),  // Starting scale (1.0 means normal size)
-              end: Offset(0.5, 0.5),    // Ending scale (0.5 means 50% of original size)
-              duration: duration,
-              curve: Curves.easeInBack,
-            )
-                .fadeOut(duration: 200.ms);
-            break;
-
-          case 'bounce':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-                .scale(duration: 400.ms, curve: Curves.easeOutCubic, begin: Offset(1.0, 1.0), end: Offset(0.8, 0.8))
-                .then(delay: 100.ms)
-                .scale(duration: 800.ms, curve: Curves.bounceOut, begin: Offset(0.8, 0.8), end: Offset(1.1, 1.1))
-                .scale(duration: 500.ms, curve: Curves.easeOut, begin: Offset(1.1, 1.1), end: Offset(1.0, 1.0));
-            break;
-
-          case 'elastic':
-            animatedWidget = textWidget
-                .animate(controller: controller, autoPlay: false)
-                .scale(duration: 1200.ms, curve: Curves.elasticOut, begin: Offset(0.4, 0.4), end: Offset(1.0, 1.0));
-            break;
-
-          default:
-            animatedWidget = textWidget;
-            break;
-        }
+        final String anim = anims[i];
+        final Duration duration = 800.ms;
 
         return GestureDetector(
           onTap: () {
-            // 3. Apply the selected animation to the clip data
             widget.onApply(anim);
-
-            // 4. Manually trigger the preview animation on the tile
-            if (_controllers.containsKey(anim)) {
-              _controllers[anim]!.reset();
-              _controllers[anim]!.forward();
-            }
+            Navigator.pop(context);
           },
           child: Container(
             decoration: BoxDecoration(
-                color: Colors.grey[800],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey[700]!, width: 0.5)),
-            // 5. Wrap the final animated widget with another .animate() call
-            // to capture the controller reference and start the continuous loop.
-            child: animatedWidget.animate(
-              onInit: (initController) {
-                // Store the controller reference
-                _controllers[anim] = initController;
-                // Start the continuous preview loop
-                initController.repeat(reverse: true);
-              },
+              color: Colors.grey[800],
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.grey[700]!, width: 0.5),
+            ),
+            child: Center(
+              child: Text(
+                anim,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+            )
+                .animate(
+              onPlay: (controller) => controller.repeat(reverse: true),
+            )
+                .applyEffect(anim, duration),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOnlineGrid() {
+    return GridView.builder(
+      padding: const EdgeInsets.all(16),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+        childAspectRatio: 1.0,
+      ),
+      itemCount: _onlineAnims.length,
+      itemBuilder: (_, i) {
+        final anim = _onlineAnims[i];
+        return GestureDetector(
+          onTap: () {
+            widget.onApply('lottie:${anim['url']}');
+            Navigator.pop(context);
+          },
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.grey[800],
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Lottie.network(
+              anim['url'],
+              fit: BoxFit.contain,
+              repeat: true,
             ),
           ),
         );
       },
     );
+  }
+}
+
+extension AnimationEffects on Widget {
+  Widget applyEffect(String name, Duration duration) {
+    final anim = this.animate();
+
+    switch (name) {
+      case 'fadeIn':
+        return anim.fadeIn(duration: duration, curve: Curves.easeOut);
+
+      case 'fadeOut':
+        return anim.fadeOut(duration: duration, curve: Curves.easeIn);
+
+      case 'slideInLeft':
+        return anim.slide(begin: const Offset(-1, 0), duration: duration);
+
+      case 'slideInRight':
+        return anim.slide(begin: const Offset(1, 0), duration: duration);
+
+      case 'slideInUp':
+        return anim.slide(begin: const Offset(0, 1), duration: duration);
+
+      case 'slideInDown':
+        return anim.slide(begin: const Offset(0, -1), duration: duration);
+
+      case 'slideOutLeft':
+        return anim.slide(end: const Offset(-1, 0), duration: duration);
+
+      case 'slideOutRight':
+        return anim.slide(end: const Offset(1, 0), duration: duration);
+
+      case 'slideOutUp':
+        return anim.slide(end: const Offset(0, -1), duration: duration);
+
+      case 'slideOutDown':
+        return anim.slide(end: const Offset(0, 1), duration: duration);
+
+      case 'zoomIn':
+        return anim.scale(
+          begin: const Offset(0.3, 0.3),
+          duration: duration,
+          curve: Curves.elasticOut,
+        );
+
+      case 'zoomOut':
+        return anim.scale(
+          end: const Offset(0.3, 0.3),
+          duration: duration,
+        );
+
+      case 'shimmer':
+        return anim.shimmer(duration: duration);
+
+      default:
+        return this; // no animation
+    }
   }
 }

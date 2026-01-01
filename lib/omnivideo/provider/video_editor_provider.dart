@@ -73,7 +73,7 @@ class VideoEditorProvider with ChangeNotifier {
   double timelineCameraSeconds = 0.0;
 
   final Map<String, List<Uint8List>> _clipThumbnailCache = {};
-
+  final ScrollController _timelineScrollController = ScrollController();
 
   // ================= SPEED =================
   double _previewSpeed = 1.0; // Live preview speed
@@ -86,7 +86,101 @@ class VideoEditorProvider with ChangeNotifier {
   String get speedMode => _speedMode;
   bool _isLoadingVideo = false;
   bool get isLoadingVideo => _isLoadingVideo;
+  ScrollController get timelineScrollController => _timelineScrollController;
+  Timer? _playbackTimer;
 
+  void togglePlayPause() {
+    if (_videoController == null) return;
+
+    if (_isPlaying) {
+      _videoController!.pause();
+      _playbackTimer?.cancel();
+    } else {
+      _videoController!.play();
+      _startPlayheadTimer();
+    }
+
+    _isPlaying = !_isPlaying;
+    notifyListeners();
+  }
+
+  void _startPlayheadTimer() {
+    _playbackTimer?.cancel();
+    _playbackTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+      if (_videoController == null) return;
+
+      final position = _videoController!.value.position;
+      final globalPos = _getGlobalPositionFromActiveClip(position);
+
+      _currentPosition = globalPos;
+      _checkAndSwitchClip(); // ← Add this
+
+      // Scroll timeline
+      final offset = globalPos.inMilliseconds / 1000.0 * pixelsPerSecond;
+      timelineScrollController.jumpTo(offset.clamp(0, timelineScrollController.position.maxScrollExtent));
+
+      notifyListeners();
+
+      if (globalPos >= totalTimelineDuration) {
+        togglePlayPause();
+      }
+    });
+  }
+
+  Duration _getGlobalPositionFromActiveClip(Duration localPos) {
+    // Find current active clip
+    for (final track in videoTracks) {
+      if (_currentPosition >= track.startTime && _currentPosition < track.endTime) {
+        return track.startTime + localPos;
+      }
+    }
+    return _currentPosition;
+  }
+
+  Duration get totalTimelineDuration {
+    return Duration(seconds: totalTimelineSeconds.toInt());
+  }
+
+  double get totalTimelineSeconds {
+    double maxEnd = 0.0;
+
+    // Video tracks
+    for (final v in videoTracks) {
+      final end = v.endTime.inMilliseconds / 1000.0;
+      maxEnd = math.max(maxEnd, end);
+    }
+
+    // Audio tracks
+    for (final a in audioTracks) {
+      final end = a.start + a.duration;
+      maxEnd = math.max(maxEnd, end);
+    }
+
+    // Text tracks
+    for (final t in textTracks) {
+      final end = (t.startTime + t.duration).inMilliseconds / 1000.0;
+      maxEnd = math.max(maxEnd, end);
+    }
+
+    return maxEnd + 2; // padding
+  }
+
+  void seekTo(Duration position) {
+    _currentPosition = position;
+    _videoController?.seekTo(position);
+
+    // Sync timeline scroll
+    final offset = position.inMilliseconds / 1000.0 * pixelsPerSecond;
+    if (timelineScrollController.hasClients) {
+      timelineScrollController.animateTo(
+        offset,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    }
+
+    notifyListeners();
+  }
 
   void openTool(String tool) {
     _currentTool = tool;
@@ -168,11 +262,6 @@ class VideoEditorProvider with ChangeNotifier {
     generateThumbnailsForAllClips(); // 🚀 parallel background loading
   }
 
-  void seekTo(Duration position) {
-    _currentPosition = position;
-    _videoController?.seekTo(position);
-    notifyListeners();
-  }
   // 🔹 DRAG CLIP
   void moveClip(VideoTrack track, Duration newStart) {
     final index = _videoTracks.indexWhere((t) => t.id == track.id);
@@ -194,15 +283,15 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   // 🔹 TOTAL TIMELINE
-  double get totalTimelineSeconds {
-    double maxEnd = 0;
-    for (final v in videoTracks) {
-      maxEnd = maxEnd < v.endTime.inSeconds
-          ? v.endTime.inSeconds.toDouble()
-          : maxEnd;
-    }
-    return maxEnd + 2;
-  }
+  // double get totalTimelineSeconds {
+  //   double maxEnd = 0;
+  //   for (final v in videoTracks) {
+  //     maxEnd = maxEnd < v.endTime.inSeconds
+  //         ? v.endTime.inSeconds.toDouble()
+  //         : maxEnd;
+  //   }
+  //   return maxEnd + 2;
+  // }
 
   double _previewRotation = 0;
   bool _previewFlipH = false;
@@ -283,19 +372,6 @@ class VideoEditorProvider with ChangeNotifier {
     _isLoadingVideo = false;
     notifyListeners();
   }
-
-  void togglePlayPause() {
-    if (_videoController == null) return;
-    if (_isPlaying) {
-      _videoController!.pause();
-    } else {
-      _videoController!.play();
-    }
-    _isPlaying = !_isPlaying;
-    notifyListeners();
-  }
-
-  Timer? _playbackTimer;
 
   // Setters with notify
   set previewCropRect(Rect rect) {
@@ -1100,6 +1176,129 @@ class VideoEditorProvider with ChangeNotifier {
   void deleteTextTrack(String id) {
     textTracks.removeWhere((t) => t.id == id);
     if (selectedTextTrack?.id == id) selectedTextTrack = null;
+    notifyListeners();
+  }
+
+  Future<String?> exportProject() async {
+    if (videoTracks.isEmpty) return null;
+
+    final tempDir = await getTemporaryDirectory();
+    final outputPath = '${tempDir.path}/export_${DateTime.now().millisecondsSinceEpoch}.mp4';
+
+    // Build complex FFmpeg command
+    final inputs = <String>[];
+    final filters = <String>[];
+
+    // Add video inputs
+    for (int i = 0; i < videoTracks.length; i++) {
+      final track = videoTracks[i];
+      inputs.add('-i "${track.path}"');
+
+      String filter = '[${i}:v]';
+
+      // Trim
+      if (track.trimStart > Duration.zero || track.trimEnd < track.duration) {
+        filter += 'trim=start=${track.trimStart.inMilliseconds / 1000}:end=${track.trimEnd.inMilliseconds / 1000},setpts=PTS-STARTPTS';
+      }
+
+      // Speed (simple uniform speed)
+      if (track.speed != 1.0) {
+        filter += ',setpts=${1 / track.speed}*PTS';
+      }
+
+      // Crop + Zoom
+      if (track.cropRect != const Rect.fromLTWH(0, 0, 1, 1) || track.cropZoom != 1.0) {
+        final w = 'iw/${track.cropZoom}';
+        final h = 'ih/${track.cropZoom}';
+        final x = 'iw*${track.cropRect.left}';
+        final y = 'ih*${track.cropRect.top}';
+        filter += ",crop=$w:$h:$x:$y";
+      }
+
+      // Rotate + Flip
+      String transform = '';
+      if (track.flipHorizontal) transform += 'hflip,';
+      if (track.flipVertical) transform += 'vflip,';
+      if (track.rotation != 0) transform += 'rotate=${track.rotation * math.pi / 180},';
+      if (transform.isNotEmpty) {
+        filter += ',${transform.substring(0, transform.length - 1)}';
+      }
+
+      filters.add('$filter[v$i]');
+    }
+
+    // Concatenate video
+    final videoConcat = filters.map((f) => '[$f]').join();
+    final videoFilter = '$videoConcat concat=n=${videoTracks.length}:v=1:a=0 [vout]';
+
+// Audio inputs and mixing
+    String audioFilter = '';
+    if (audioTracks.isNotEmpty) {
+      for (int i = 0; i < audioTracks.length; i++) {
+        inputs.add('-i "${audioTracks[i].path}"');
+      }
+
+      final audioIndices = List.generate(audioTracks.length, (i) => videoTracks.length + i);
+      final audioMix = audioIndices.map((i) => '[$i:a]').join();
+      audioFilter = '$audioMix amix=inputs=${audioTracks.length}[aout]';
+    }
+
+// Final command
+    final command = [
+      ...inputs,
+      '-filter_complex',
+      '"$videoFilter${audioFilter.isEmpty ? '' : ';$audioFilter'}"',
+      '-map "[vout]"',
+      if (audioFilter.isNotEmpty) '-map "[aout]"',
+      '-c:v libx264 -preset veryfast -crf 23',
+      '-c:a aac -b:a 128k',
+      outputPath,
+    ].join(' ');
+
+
+    final session = await FFmpegKit.execute(command);
+    final returnCode = await session.getReturnCode();
+
+    if (ReturnCode.isSuccess(returnCode)) {
+      return outputPath;
+    } else {
+      debugPrint('Export failed: ${await session.getLogsAsString()}');
+      return null;
+    }
+  }
+
+  void _checkAndSwitchClip() {
+    final pos = currentPosition;
+
+    // Find which video track is active at current position
+    VideoTrack? activeTrack;
+    for (final track in videoTracks) {
+      if (pos >= track.startTime && pos < track.endTime) {
+        activeTrack = track;
+        break;
+      }
+    }
+
+    if (activeTrack == null) {
+      _videoController?.pause();
+      return;
+    }
+
+    // If different from current, switch
+    if (_videoController == null || _videoController!.dataSource != activeTrack.path) {
+      _switchToClip(activeTrack);
+    }
+
+    // Seek to relative position within clip
+    final relativePos = pos - activeTrack.startTime;
+    _videoController?.seekTo(relativePos);
+  }
+
+  Future<void> _switchToClip(VideoTrack track) async {
+    await _videoController?.dispose();
+    _videoController = VideoPlayerController.file(File(track.path));
+    await _videoController!.initialize();
+    _videoController!.setVolume(isSoundOn ? 1.0 : 0.0);
     notifyListeners();
   }
 }

@@ -89,8 +89,8 @@ class AudioTrackRow extends StatelessWidget {
           // "Add Audio" button
           if (provider.audioTracks.isEmpty)
             Positioned(
-              left: 200, // arbitrary — will be centered by layout
-              top: 18,
+              left: 0, // arbitrary — will be centered by layout
+              top: 8,
               child: GestureDetector(
                 onTap: () {
                   showModalBottomSheet(
@@ -104,20 +104,16 @@ class AudioTrackRow extends StatelessWidget {
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: Colors.deepPurple.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(color: const Color(0xFF8B5CF6), width: 1.5),
-                  ),
+
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.add_circle_outline, color: Color(0xFF8B5CF6), size: 24),
+                      Icon(Icons.add_circle_outline, color: Color(0xA8FFFFFF), size: 24),
                       SizedBox(width: 8),
                       Text(
                         'Add Audio',
                         style: TextStyle(
-                          color: Color(0xFF8B5CF6),
+                          color: Color(0xA8FFFFFF),
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
                         ),

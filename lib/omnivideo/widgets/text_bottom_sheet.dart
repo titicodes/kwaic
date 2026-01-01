@@ -32,7 +32,7 @@ class _TextBottomSheetState extends State<TextBottomSheet> with SingleTickerProv
     final provider = context.read<VideoEditorProvider>();
 
     return Container(
-      height: MediaQuery.of(context).size.height * 0.7,
+      height: MediaQuery.of(context).size.height * 0.5,
       decoration: const BoxDecoration(
         color: Colors.black,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),

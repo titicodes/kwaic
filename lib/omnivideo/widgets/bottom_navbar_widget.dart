@@ -65,20 +65,7 @@ class BottomNavBarWidget extends StatelessWidget {
             _NavItem(Icons.text_fields, 'Text', onTap: () => provider.openTool('text')),
             _NavItem(Icons.auto_awesome, 'Effect', onTap: () => provider.openTool('effect')),
 
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF8B5CF6),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Text(
-                'Export',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
+
           ],
         ),
       ),

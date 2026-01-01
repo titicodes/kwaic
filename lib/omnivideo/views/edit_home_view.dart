@@ -136,8 +136,25 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
       },
     );
   }
-
   Widget _buildActiveBottomSheet(String tool, VideoEditorProvider provider) {
+    // Safety: For video editing tools, require a selected video clip
+    if (['trim', 'rotate', 'flip', 'fill', 'speed'].contains(tool)) {
+      if (provider.selectedVideoTrackId == null) {
+        // Auto-close if no clip selected
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          provider
+            ..showBottomSheet = false
+            ..showContextToolbar = true;
+        });
+        return const Center(
+          child: Text(
+            'Please select a video clip first',
+            style: TextStyle(color: Colors.white, fontSize: 16),
+          ),
+        );
+      }
+    }
+
     switch (tool) {
       case 'trim':
         return const TrimBottomSheet();
@@ -145,7 +162,7 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
       case 'rotate':
         return rotate.RotateBottomSheet(
           onClose: () {
-            provider.rotation = 0; // Reset preview on cancel
+            provider.rotation = 0.0;
             provider
               ..showBottomSheet = false
               ..showContextToolbar = true;
@@ -153,21 +170,19 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
           onApply: () {
             final current = provider.videoTracks[provider.selectedTrackIndex];
             final updated = current.copyWith(
-              rotation: current.rotation + provider.rotation, // Apply accumulated preview
+              rotation: current.rotation + provider.rotation,
             );
             provider.replaceTrack(provider.selectedTrackIndex, updated);
-            provider.rotation = 0; // Reset preview
+            provider.rotation = 0.0;
 
             provider
               ..showBottomSheet = false
               ..showContextToolbar = true;
           },
           onRotate: (angle) {
-            provider.rotation += angle; // Live preview update
+            provider.rotation += angle;
           },
-          onFlip: () {
-            // Flip is handled in flip sheet
-          },
+          onFlip: () {}, // not used in rotate sheet
         );
 
       case 'flip':
@@ -182,12 +197,8 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
           onApply: () {
             final current = provider.videoTracks[provider.selectedTrackIndex];
             final updated = current.copyWith(
-              flipHorizontal: current.flipHorizontal != provider.flipHorizontal
-                  ? provider.flipHorizontal
-                  : current.flipHorizontal,
-              flipVertical: current.flipVertical != provider.flipVertical
-                  ? provider.flipVertical
-                  : current.flipVertical,
+              flipHorizontal: provider.flipHorizontal,
+              flipVertical: provider.flipVertical,
             );
             provider.replaceTrack(provider.selectedTrackIndex, updated);
             provider.flipHorizontal = false;
@@ -209,14 +220,14 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
       case 'fill':
         return fill.FillBottomSheet(
           onClose: () {
-            provider.resetCrop(); // Reset preview on cancel
+            provider.resetCrop();
             provider
               ..showBottomSheet = false
               ..showContextToolbar = true;
           },
           onApply: () {
-            final currentTrack = provider.videoTracks[provider.selectedTrackIndex];
-            final updated = currentTrack.copyWith(
+            final current = provider.videoTracks[provider.selectedTrackIndex];
+            final updated = current.copyWith(
               cropRect: provider.previewCropRect,
               cropZoom: provider.previewCropZoom,
             );
@@ -232,12 +243,15 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
         return AudioLibrarySheet(insertPosition: provider.currentPosition);
 
       case 'speed':
-        return const SpeedBottomSheet();
+        return SpeedBottomSheet(
+          // SpeedBottomSheet doesn't need onApply/onClose — it uses its own buttons
+        );
+
       case 'text':
         return const TextBottomSheet();
 
       default:
-        return const SizedBox();
+        return const SizedBox.shrink();
     }
   }
 }
@@ -269,11 +283,19 @@ class _TopBar extends StatelessWidget {
               color: const Color(0xFF8B5CF6),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: const Text(
-              'Export',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
+            child: GestureDetector(
+              onTap: () async {
+                final provider = context.read<VideoEditorProvider>();
+                final outputPath = await provider.exportProject();
+                if (outputPath != null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Exported to: $outputPath')),
+                  );
+                }
+              },
+              child: const Text(
+                'Export',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
               ),
             ),
           ),
@@ -303,12 +325,6 @@ class _PlaybackControls extends StatelessWidget {
             ),
             onPressed: () {
               provider.togglePlayPause();
-              // Also control native player for sound
-              if (provider.isPlaying) {
-                provider.videoController?.play();
-              } else {
-                provider.videoController?.pause();
-              }
             },
           ),
           const SizedBox(width: 8),

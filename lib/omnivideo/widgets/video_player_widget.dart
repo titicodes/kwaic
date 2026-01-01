@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:provider/provider.dart';
 import '../provider/video_editor_provider.dart';
+import 'draggable_resizable_text.dart';
 
 class VideoPlayerWidget extends StatelessWidget {
   final VideoPlayerController controller;
@@ -18,7 +19,7 @@ class VideoPlayerWidget extends StatelessWidget {
     final bool isInitialized = controller.value.isInitialized;
     final isSelectedClip = provider.selectedVideoTrackId != null;
 
-    // Use preview values if we're in rotate/flip/fill tool, otherwise use saved track values
+    // Effective values (preview during edit, saved otherwise)
     final double effectiveRotation = provider.currentTool == 'rotate'
         ? currentTrack.rotation + provider.rotation
         : currentTrack.rotation;
@@ -39,91 +40,99 @@ class VideoPlayerWidget extends StatelessWidget {
         ? provider.previewCropZoom
         : currentTrack.cropZoom;
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        if (currentTrack.thumbnail != null)
-          Image.memory(
-            currentTrack.thumbnail!,
-            fit: BoxFit.cover,
-          ),
+    final Size videoSize = isInitialized ? controller.value.size : Size.zero;
 
-        if (isInitialized)
-          AspectRatio(
-            aspectRatio: controller.value.aspectRatio,
-            child: ClipRect(
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: controller.value.size.width,
-                  height: controller.value.size.height,
-                  child: Transform(
-                    alignment: Alignment.center,
-                    transform: Matrix4.identity()
-                      ..rotateZ(effectiveRotation * 3.14159 / 180)
-                      ..scale(effectiveFlipH ? -1.0 : 1.0, effectiveFlipV ? -1.0 : 1.0),
-                    child: _buildCropOverlay(effectiveCrop, effectiveZoom, controller.value.size),
+    return Container(
+      color: Colors.black,
+      padding: const EdgeInsets.all(16), // ← Perfect spacing like screenshot
+      child: Center(
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Thumbnail background (shows instantly)
+            if (currentTrack.thumbnail != null)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.memory(
+                  currentTrack.thumbnail!,
+                  fit: BoxFit.contain,
+                  width: double.infinity,
+                  height: double.infinity,
+                ),
+              ),
+
+            // Video player — letterboxed, rounded, centered
+            if (isInitialized)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: AspectRatio(
+                  aspectRatio: controller.value.aspectRatio,
+                  child: FittedBox(
+                    fit: BoxFit.contain, // ← Letterbox, no crop
+                    child: SizedBox(
+                      width: videoSize.width,
+                      height: videoSize.height,
+                      child: Transform(
+                        alignment: Alignment.center,
+                        transform: Matrix4.identity()
+                          ..rotateZ(effectiveRotation * 3.14159 / 180)
+                          ..scale(effectiveFlipH ? -1.0 : 1.0, effectiveFlipV ? -1.0 : 1.0),
+                        child: _buildCropOverlay(effectiveCrop, effectiveZoom, videoSize),
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-          ),
-        // After video layer
-// Text overlays
-        ...provider.textTracks.map((text) {
-          final currentTime = provider.currentPosition;
-          if (currentTime < text.startTime || currentTime > text.startTime + text.duration) {
-            return const SizedBox.shrink();
-          }
 
-          final videoSize = controller.value.size;
-          final double centerX = text.position.dx * videoSize.width;
-          final double centerY = text.position.dy * videoSize.height;
+            // Text overlays
+            ...provider.textTracks.map((textTrack) {
+              final currentTime = provider.currentPosition;
+              if (currentTime < textTrack.startTime ||
+                  currentTime > textTrack.startTime + textTrack.duration) {
+                return const SizedBox.shrink();
+              }
 
-          return Positioned(
-            left: centerX - 150, // rough centering (adjust based on text length)
-            top: centerY - 50,
-            child: Transform.rotate(
-              angle: text.rotation,
-              child: Text(
-                text.text,
-                style: TextStyle(
-                  color: text.color,
-                  fontSize: text.fontSize,
-                  fontFamily: text.fontFamily,
-                  shadows: const [
-                    Shadow(color: Colors.black54, offset: Offset(2, 2), blurRadius: 4),
-                  ],
+              if (videoSize == Size.zero) return const SizedBox.shrink();
+
+              return DraggableResizableText(
+                textTrack: textTrack,
+                videoSize: videoSize,
+                onUpdate: (updated) => provider.updateTextTrack(updated),
+              );
+            }).toList(),
+
+            // Loading overlay
+            if (!isInitialized || provider.isLoadingVideo)
+              Container(
+                color: Colors.black.withOpacity(0.6),
+                child: const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
+                      SizedBox(height: 16),
+                      Text(
+                        "Loading video...",
+                        style: TextStyle(color: Colors.white70, fontSize: 14),
+                      ),
+                    ],
+                  ),
                 ),
-                textAlign: text.alignment,
               ),
-            ),
-          );
-        }).toList(),
-        if (!isInitialized || provider.isLoadingVideo)
-          Container(
-            color: Colors.black.withOpacity(0.5),
-            child: const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
-                  SizedBox(height: 16),
-                  Text("Loading video...", style: TextStyle(color: Colors.white70, fontSize: 14)),
-                ],
-              ),
-            ),
-          ),
 
-        if (isSelectedClip)
-          IgnorePointer(
-            child: Container(
-              decoration: BoxDecoration(
-                border: Border.all(color: const Color(0xFF00D9FF), width: 4),
+            // Selection border
+            if (isSelectedClip)
+              IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: const Color(0xFFFFFFFF), width: 2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
               ),
-            ),
-          ),
-      ],
+          ],
+        ),
+      ),
     );
   }
 

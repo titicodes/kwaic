@@ -138,7 +138,7 @@ class VideoEditorProvider with ChangeNotifier {
       }
     });
   }
-  
+
   Duration _getGlobalPositionFromActiveClip(Duration localPos) {
     // Find current active clip
     for (final track in videoTracks) {
@@ -774,7 +774,7 @@ class VideoEditorProvider with ChangeNotifier {
 
     // Target: ~5 thumbnails per second of video (CapCut feel)
     final int thumbnailsPerSecond = 5;
-    final int targetCount = (duration.inSeconds * thumbnailsPerSecond).clamp(10, 200);
+    final int targetCount = (duration.inSeconds * thumbnailsPerSecond).clamp(20, 150);
 
     // Calculate interval in seconds
     final double intervalSeconds = duration.inSeconds / targetCount;

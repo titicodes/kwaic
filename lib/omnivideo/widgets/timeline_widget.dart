@@ -6,6 +6,7 @@ import '../provider/video_editor_provider.dart';
 import '../timeline_constants.dart';
 import 'audio_timeline_row.dart';
 import 'clip_widget.dart';
+import 'dart:math' as math;
 
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -35,7 +36,6 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   void _onScroll() {
     final provider = context.read<VideoEditorProvider>();
     if (!provider.timelineScrollController.hasClients) return;
-
     final seconds = provider.timelineScrollController.offset / pixelsPerSecond;
     final newPos = Duration(milliseconds: (seconds * 1000).round());
     provider.seekTo(newPos);
@@ -60,47 +60,55 @@ class _TimelineWidgetState extends State<TimelineWidget> {
           height: 180,
           child: Stack(
             children: [
-              // Fixed left UI (sound + cover)
+              // Fixed left UI (Sound + Cover)
               Positioned(
-                left: _center - leftUiWidth,
+                left: 0,
                 top: 30,
                 child: AnimatedBuilder(
                   animation: provider.timelineScrollController,
                   builder: (_, __) {
-                    final dx = provider.timelineScrollController.hasClients
-                        ? -provider.timelineScrollController.offset
+                    final offset = provider.timelineScrollController.hasClients
+                        ? provider.timelineScrollController.offset
                         : 0.0;
-                    final clampedDx = math.min(0, dx);
+                    final translateX = offset > _center - leftUiWidth
+                        ? offset - (_center - leftUiWidth)
+                        : 0.0;
                     return Transform.translate(
-                      offset: Offset(clampedDx.toDouble(), 0),
+                      offset: Offset(-translateX, 0),
                       child: const _LeftSection(),
                     );
                   },
                 ),
               ),
-
-              // Scrollable timeline — ClampingScrollPhysics for smooth feel
+              // Scrollable content — infinite to the right
               Positioned.fill(
                 child: SingleChildScrollView(
                   controller: provider.timelineScrollController,
                   scrollDirection: Axis.horizontal,
-                  physics: const ClampingScrollPhysics(), // ← Smooth, no bounce fight
-                  child:  Row(
-                children: [
-                SizedBox(width: _center),
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const DurationRuler(),
-                    const SizedBox(height: 8),
-                    const VideoClipsRow(),
-                    AudioTrackRow(key: ValueKey(provider.audioTracks.length)),
-                  ],
-                ),
-                SizedBox(width: _center + 400), // ← Extra space on right for scrolling left
-                ],
-              ),
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(width: _center),
+
+                      SizedBox(
+                        width: provider.timelineWorldWidth,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: const [
+                            DurationRuler(),
+                            SizedBox(height: 8),
+                            VideoClipsRow(),
+                            SizedBox(height: 8),
+                            AudioTrackRow(),
+                          ],
+                        ),
+                      ),
+
+
+                      const SizedBox(width: 800), // Extra space for scrolling far right
+                    ],
+                  ),
                 ),
               ),
 
@@ -119,17 +127,16 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   }
 }
 
-/// 🔒 FIXED LEFT UI
+
+// Your original _LeftSection — unchanged
 class _LeftSection extends StatelessWidget {
   const _LeftSection();
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<VideoEditorProvider>();
-
     return Row(
       children: [
-        // Sound Toggle
         GestureDetector(
           onTap: provider.toggleSound,
           child: _box(
@@ -150,10 +157,8 @@ class _LeftSection extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 8),
-
-        // Cover — Now shows current video frame
         GestureDetector(
-          onTap: provider.selectCover, // keep existing function
+          onTap: provider.selectCover,
           child: _box(
             Column(
               children: [
@@ -198,7 +203,9 @@ class _LeftSection extends StatelessWidget {
   }
 }
 
-/// 🎬 VIDEO CLIPS
+// Your original VideoClipsRow, DurationRuler, CenteredPlayhead — unchanged
+// (keep them exactly as you had them)
+
 class VideoClipsRow extends StatelessWidget {
   const VideoClipsRow({super.key});
 
@@ -209,13 +216,12 @@ class VideoClipsRow extends StatelessWidget {
 
     return SizedBox(
       height: 60,
-      width: provider.timelineWorldWidth,
+      // ← NO width here — let it grow
       child: Stack(
         children: provider.videoTracks.map((track) {
           final double width = track.duration.inMilliseconds / 1000 * pixelsPerSecond;
           final double left = cursor;
           cursor += width + clipGap;
-
           final bool isSelected = provider.selectedVideoTrackId == track.id;
 
           return Positioned(
@@ -230,7 +236,6 @@ class VideoClipsRow extends StatelessWidget {
                 final deltaSeconds = details.delta.dx / pixelsPerSecond;
                 final newStartSeconds = (track.startTime.inMilliseconds / 1000) + deltaSeconds;
                 if (newStartSeconds < 0) return;
-
                 final updated = track.copyWith(
                   startTime: Duration(seconds: newStartSeconds.toInt()),
                   endTime: Duration(seconds: (newStartSeconds + track.duration.inSeconds).toInt()),
@@ -260,7 +265,7 @@ class VideoClipsRow extends StatelessWidget {
   }
 }
 
-/// ⏱ TIME RULER - DYNAMIC
+
 class DurationRuler extends StatelessWidget {
   const DurationRuler({super.key});
 
@@ -290,7 +295,6 @@ class DurationRuler extends StatelessWidget {
   String _fmt(int s) => '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
 }
 
-/// ▶️ PLAYHEAD
 class CenteredPlayhead extends StatelessWidget {
   const CenteredPlayhead({super.key});
 

@@ -46,7 +46,9 @@ class AudioTrackRow extends StatelessWidget {
                   if (newStart < 0) return;
 
                   final updated = track.copyWith(start: newStart);
-                  final index = provider.audioTracks.indexWhere((t) => t.id == track.id);
+                  final index = provider.audioTracks.indexWhere(
+                    (t) => t.id == track.id,
+                  );
                   if (index != -1) {
                     final newList = List<AudioTrack>.from(provider.audioTracks);
                     newList[index] = updated;
@@ -55,31 +57,50 @@ class AudioTrackRow extends StatelessWidget {
                 },
                 child: Container(
                   width: width.clamp(60.0, double.infinity),
-                  margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 4,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.deepPurple.withOpacity(0.4),
                     borderRadius: BorderRadius.circular(8),
-                    border: isSelected
-                        ? Border.all(color: const Color(0xFF00D9FF), width: 3)
-                        : null,
-                    boxShadow: isSelected
-                        ? [const BoxShadow(color: Color(0xFF00D9FF), blurRadius: 8)]
-                        : null,
+                    border:
+                        isSelected
+                            ? Border.all(
+                              color: const Color(0xFF00D9FF),
+                              width: 3,
+                            )
+                            : null,
+                    boxShadow:
+                        isSelected
+                            ? [
+                              const BoxShadow(
+                                color: Color(0xFF00D9FF),
+                                blurRadius: 8,
+                              ),
+                            ]
+                            : null,
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                    child: track.waveform != null
-                        ? AudioWaveform(
-                      waveform: track.waveform!,
-                      color: Colors.white,
-                      height: 56,
-                    )
-                        : const Center(
-                      child: Text(
-                        'Loading...',
-                        style: TextStyle(color: Colors.white70, fontSize: 10),
-                      ),
-                    ),
+                    child:
+                        track.waveform != null
+                            ? RepaintBoundary(
+                              child: AudioWaveform(
+                                waveform: track.waveform!,
+                                color: Colors.white,
+                                height: 56,
+                              ),
+                            )
+                            : const Center(
+                              child: Text(
+                                'Loading...',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ),
                   ),
                 ),
               ),
@@ -97,18 +118,26 @@ class AudioTrackRow extends StatelessWidget {
                     context: context,
                     isScrollControlled: true,
                     backgroundColor: Colors.transparent,
-                    builder: (_) => AudioLibrarySheet(
-                      insertPosition: provider.currentPosition,
-                    ),
+                    builder:
+                        (_) => AudioLibrarySheet(
+                          insertPosition: provider.currentPosition,
+                        ),
                   );
                 },
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
 
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.add_circle_outline, color: Color(0xA8FFFFFF), size: 24),
+                      Icon(
+                        Icons.add_circle_outline,
+                        color: Color(0xA8FFFFFF),
+                        size: 24,
+                      ),
                       SizedBox(width: 8),
                       Text(
                         'Add Audio',

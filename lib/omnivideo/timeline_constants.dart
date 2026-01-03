@@ -1,4 +1,4 @@
-const double pixelsPerSecond = 60;
+const double pixelsPerSecond = 100;
 const double snapTolerancePx = 6;
 const double frameRate = 30.0;
 double frameDurationSeconds = 1 / frameRate;

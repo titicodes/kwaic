@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:kwaic/omnivideo/model/video_track.dart';
 import 'package:provider/provider.dart';
+import 'package:video_player/video_player.dart';
 import '../../nes_scr/widgets/audio_library_sheet.dart';
 import '../provider/video_editor_provider.dart';
 import '../widgets/bottom_navbar_widget.dart';
@@ -39,33 +42,34 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
   void initState() {
     super.initState();
 
-    _initializeVideos().then((_) {
-      // _provider.generateThumbnailsForAllClips(); // Add this line
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _initializeVideos();
     });
   }
 
+
   Future<void> _initializeVideos() async {
-    final provider = context.read<VideoEditorProvider>(); // ← read from context
-    _videoTracks =
-        widget.videosWithThumbs.asMap().entries.map((entry) {
-          final index = entry.key;
-          final video = entry.value;
-          return VideoTrack(
-            id: '${widget.projectId}_$index',
-            path: video['file'].path,
-            startTime: Duration.zero,
-            endTime: const Duration(seconds: 10),
-            thumbnail: video['thumbnail'],
-            timelineThumbnails: [],
-          );
-        }).toList();
+    final provider = context.read<VideoEditorProvider>();
+
+    _videoTracks = widget.videosWithThumbs.asMap().entries.map((entry) {
+      final index = entry.key;
+      final video = entry.value;
+      return VideoTrack(
+        id: '${widget.projectId}_$index',
+        path: video['file'].path,
+        startTime: Duration.zero,
+        endTime: const Duration(seconds: 30), // fixed length is fine for now
+        thumbnail: video['thumbnail'],
+        timelineThumbnails: [],
+      );
+    }).toList();
 
     provider.videoTracks = _videoTracks;
+
     if (_videoTracks.isNotEmpty) {
-      _selectedTrackIndex = 0;
       provider.selectedTrackIndex = 0;
-      await provider.loadVideo(_videoTracks[0].path);
-      provider.generateThumbnailsForAllClips();
+      provider.selectVideoTrack(_videoTracks[0].id);
+      await provider.loadVideo(_videoTracks[0].path); // ← This loads and shows video immediately
     }
   }
 
@@ -79,6 +83,7 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
   Widget build(BuildContext context) {
     return Consumer<VideoEditorProvider>(
       builder: (context, provider, child) {
+
         return Scaffold(
           backgroundColor: Colors.black,
           body: SafeArea(
@@ -91,9 +96,36 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
                     Expanded(
                       child: Container(
                         color: Colors.black,
-                        child: VideoPlayerWidget(
-                          controller: provider.videoController!,
-                        ),
+                        child:
+                            provider.videoController != null &&
+                                    provider
+                                        .videoController!
+                                        .value
+                                        .isInitialized
+                                ? VideoPlayerWidget(
+                                  controller: provider.videoController!,
+                                )
+                                : Container(
+                                  color: Colors.black,
+                                  child: Center(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (provider.isLoadingVideo)
+                                          const CircularProgressIndicator(
+                                            color: Colors.white,
+                                          )
+                                        else
+                                          const Text(
+                                            "Select a clip to preview",
+                                            style: TextStyle(
+                                              color: Colors.white70,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
                       ),
                     ),
                     _PlaybackControls(provider: provider),
@@ -136,6 +168,7 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
       },
     );
   }
+
   Widget _buildActiveBottomSheet(String tool, VideoEditorProvider provider) {
     // Safety: For video editing tools, require a selected video clip
     if (['trim', 'rotate', 'flip', 'fill', 'speed'].contains(tool)) {
@@ -295,7 +328,10 @@ class _TopBar extends StatelessWidget {
               },
               child: const Text(
                 'Export',
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ),

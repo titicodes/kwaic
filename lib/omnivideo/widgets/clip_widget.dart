@@ -40,25 +40,24 @@ class VideoClipWidget extends StatelessWidget {
         clipBehavior: Clip.hardEdge, // 💥 HARD STOP OVERFLOW
         child:
             track.timelineThumbnails.isEmpty
-                ? Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Container(color: Colors.blueGrey.shade800),
-                    const Center(
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white70,
-                      ),
-                    ),
-                    const Center(
-                      child: Icon(
-                        Icons.videocam,
-                        color: Colors.white54,
-                        size: 28,
-                      ),
-                    ),
-                  ],
-                )
+                ? (track.thumbnail != null
+                    ? Image.memory(
+                      track.thumbnail!,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                    )
+                    : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Container(color: Colors.blueGrey.shade800),
+                        const Center(
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ))
                 : LayoutBuilder(
                   builder: (context, c) {
                     final fitCount = (c.maxWidth / thumbWidth).floor();

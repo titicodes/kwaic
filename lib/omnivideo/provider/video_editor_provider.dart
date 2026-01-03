@@ -106,18 +106,30 @@ class VideoEditorProvider with ChangeNotifier {
 
   void _startPlayheadTimer() {
     _playbackTimer?.cancel();
-    _playbackTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      if (_videoController == null) return;
+    _playbackTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (_videoController == null || !_videoController!.value.isInitialized) return;
 
       final position = _videoController!.value.position;
       final globalPos = _getGlobalPositionFromActiveClip(position);
-
       _currentPosition = globalPos;
-      _checkAndSwitchClip(); // ← Add this
 
-      // Scroll timeline
-      final offset = globalPos.inMilliseconds / 1000.0 * pixelsPerSecond;
-      timelineScrollController.jumpTo(offset.clamp(0, timelineScrollController.position.maxScrollExtent));
+      _checkAndSwitchClip();
+
+      // === SMOOTH CENTERED SCROLL LIKE CAPCUT ===
+      final targetOffset = globalPos.inMilliseconds / 1000.0 * pixelsPerSecond;
+      final maxOffset = timelineScrollController.position.maxScrollExtent;
+      final halfScreen = timelineScrollController.position.viewportDimension / 2;
+
+      final desiredOffset = (targetOffset - halfScreen).clamp(0.0, maxOffset);
+
+      // Smooth animated scroll
+      if ((timelineScrollController.offset - desiredOffset).abs() > 1.0) {
+        timelineScrollController.animateTo(
+          desiredOffset,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
+        );
+      }
 
       notifyListeners();
 
@@ -126,7 +138,7 @@ class VideoEditorProvider with ChangeNotifier {
       }
     });
   }
-
+  
   Duration _getGlobalPositionFromActiveClip(Duration localPos) {
     // Find current active clip
     for (final track in videoTracks) {
@@ -136,6 +148,38 @@ class VideoEditorProvider with ChangeNotifier {
     }
     return _currentPosition;
   }
+
+  Future<void> loadVideo(String path) async {
+    final oldController = _videoController;
+
+    _isLoadingVideo = true;
+    notifyListeners();
+
+    _videoController = VideoPlayerController.file(File(path));
+    await _videoController!.initialize();
+    _videoController!.addListener(_updatePosition);
+
+    // In loadVideo(), after initialize():
+    final thumbs = await generateClipThumbnails(
+      videoPath: path,
+      duration: _videoController!.value.duration,
+    );
+
+    final currentIndex = selectedTrackIndex;
+    final track = videoTracks[currentIndex];
+    final updatedTrack = track.copyWith(timelineThumbnails: thumbs);
+    replaceTrack(currentIndex, updatedTrack);
+
+    _isLoadingVideo = false;
+    notifyListeners();
+
+    if (oldController != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await oldController.dispose();
+      });
+    }
+  }
+
 
   Duration get totalTimelineDuration {
     return Duration(seconds: totalTimelineSeconds.toInt());
@@ -419,30 +463,6 @@ class VideoEditorProvider with ChangeNotifier {
     _videoController?.removeListener(_updatePosition);
     _videoController = controller;
     _videoController?.addListener(_updatePosition);
-    notifyListeners();
-  }
-
-  Future<void> loadVideo(String path) async {
-
-    // Then, start loading the full video
-    _videoController?.dispose();
-    _videoController = VideoPlayerController.file(File(path));
-    await _videoController!.initialize();
-    _videoController!.addListener(_updatePosition);
-
-    // Generate thumbnails only if they are not cached
-    final duration = _videoController!.value.duration;
-    final thumbs = await generateClipThumbnails(videoPath: path, duration: duration);
-
-
-    // Update the current track with new thumbnails
-    final currentIndex = selectedTrackIndex;
-    final track = videoTracks[currentIndex];
-    final updatedTrack = track.copyWith(timelineThumbnails: thumbs);
-    replaceTrack(currentIndex, updatedTrack);
-
-    _currentPosition = Duration.zero;
-    _currentTimeSeconds = 0.0;
     notifyListeners();
   }
 
@@ -747,39 +767,37 @@ class VideoEditorProvider with ChangeNotifier {
   Future<List<Uint8List>> generateClipThumbnails({
     required String videoPath,
     required Duration duration,
-  })
-  async {
+  }) async {
     if (ThumbnailCache.has(videoPath)) {
       return ThumbnailCache.get(videoPath);
     }
 
-    final int count = math.min(30, duration.inSeconds + 1); // adjust as needed
-    final tempDir = (await getTemporaryDirectory()).path;
-    final pattern = '$tempDir/thumb_%03d.jpg'; // thumb_001.jpg, etc.
+    // Target: ~5 thumbnails per second of video (CapCut feel)
+    final int thumbnailsPerSecond = 5;
+    final int targetCount = (duration.inSeconds * thumbnailsPerSecond).clamp(10, 200);
 
-    // Single FFmpeg command: extract thumbnails at ~1 per second
-    final command = '-i "$videoPath" -vf fps=1/$count -q:v 2 "$pattern"';
+    // Calculate interval in seconds
+    final double intervalSeconds = duration.inSeconds / targetCount;
 
-    final session = await FFmpegKit.execute(command);
-    final returnCode = await session.getReturnCode();
+    final List<Uint8List> thumbs = [];
 
-    if (ReturnCode.isSuccess(returnCode)) {
-      final List<Uint8List> thumbs = [];
-      for (int i = 1; i <= count; i++) {
-        final filePath = '$tempDir/thumb_${i.toString().padLeft(3, '0')}.jpg';
-        final file = File(filePath);
-        if (file.existsSync()) {
-          thumbs.add(await file.readAsBytes());
-          await file.delete(); // clean up
-        }
+    for (int i = 0; i < targetCount; i++) {
+      final double timeSeconds = i * intervalSeconds;
+      final uint8list = await VideoThumbnail.thumbnailData(
+        video: videoPath,
+        imageFormat: ImageFormat.JPEG,
+        timeMs: (timeSeconds * 1000).toInt(),
+        quality: 80,
+        maxWidth: 120, // Small but sharp enough
+      );
+
+      if (uint8list != null) {
+        thumbs.add(uint8list);
       }
-      ThumbnailCache.put(videoPath, thumbs);
-      return thumbs;
-    } else {
-      // Fallback to old method or throw
-      debugPrint('FFmpeg thumbnail failed');
-      return await compute(generateThumbnailsTask, ThumbnailArgs(videoPath, count));
     }
+
+    ThumbnailCache.put(videoPath, thumbs);
+    return thumbs;
   }
 
   // Load video into player
@@ -1295,11 +1313,23 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   Future<void> _switchToClip(VideoTrack track) async {
-    await _videoController?.dispose();
+    final oldController = _videoController;
+
+    // Create and initialize the new one
     _videoController = VideoPlayerController.file(File(track.path));
     await _videoController!.initialize();
     _videoController!.setVolume(isSoundOn ? 1.0 : 0.0);
+
+    // Notify first – UI now uses the new controller
     notifyListeners();
+
+    // Dispose old one safely after the frame/build cycle
+    if (oldController != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await oldController.dispose();
+      });
+      // Or simpler short delay:
+      // Future.delayed(const Duration(milliseconds: 100), () => oldController.dispose());
+    }
   }
 }
-

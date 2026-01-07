@@ -139,11 +139,10 @@ class VideoPlayerWidget extends StatelessWidget {
 
                               // Draggable/resizable text overlays
                               // Text overlays (synced to global currentPosition)
-                              Builder(
-                                builder: (context) {
-                                  final currentTime = context.watch<VideoEditorProvider>().currentPosition;
+                              Selector<VideoEditorProvider, Duration>(
+                                selector: (_, p) => p.currentPosition,
+                                builder: (_, currentTime, __) {
                                   final provider = context.read<VideoEditorProvider>();
-
                                   return Stack(
                                     children: provider.textTracks
                                         .where((t) => currentTime >= t.startTime && currentTime <= t.endTime)
@@ -155,7 +154,8 @@ class VideoPlayerWidget extends StatelessWidget {
                                         .toList(),
                                   );
                                 },
-                              ),
+                              )
+
 
                             ],
                           ),

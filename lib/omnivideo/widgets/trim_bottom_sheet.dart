@@ -31,11 +31,14 @@ class _TrimBottomSheetState extends State<TrimBottomSheet> {
   void initState() {
     super.initState();
 
+
     final provider = context.read<VideoEditorProvider>();
     track = provider.videoTracks[provider.selectedTrackIndex];
     duration = track.duration;
 
     provider.setTrimRangeSilently(Duration.zero, duration);
+    provider.startTrimPreview();
+    provider.endTrimPreview();
   }
 
   /// ✅ Visible thumbnails based on trim window
@@ -144,9 +147,8 @@ class _TrimBottomSheetState extends State<TrimBottomSheet> {
 
                           final ms =
                           (newPercent * duration.inMilliseconds).round();
-                          provider.trimStart =
-                              Duration(milliseconds: ms);
-                          provider.seekTo(provider.trimStart);
+                          provider.previewTrimStart(Duration(milliseconds: ms));
+
                         },
                       ),
 
@@ -262,6 +264,7 @@ class _TrimBottomSheetState extends State<TrimBottomSheet> {
       trimEnd: provider.trimEnd,
     );
 
+    provider.endTrimPreview();
     provider.replaceTrack(provider.selectedTrackIndex, updatedTrack);
 
     provider

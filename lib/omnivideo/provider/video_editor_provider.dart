@@ -8,6 +8,8 @@ import 'package:ffmpeg_kit_min_gpl/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_min_gpl/return_code.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:just_waveform/just_waveform.dart';
 import 'package:kwaic/nes_scr/model/timeline_item.dart';
 import 'package:kwaic/omnivideo/model/video_track.dart';
@@ -38,7 +40,6 @@ class VideoEditorProvider with ChangeNotifier {
   List<VideoTrack> _videoTracks = [];
   List<AudioTrack> audioTracks = [];
   int _selectedTrackIndex = 0;
-  bool _isPlaying = false;
   Duration _currentPosition = Duration.zero;  // Track current position
   String _currentTool = '';
   bool _showContextToolbar = false;
@@ -47,6 +48,8 @@ class VideoEditorProvider with ChangeNotifier {
   bool _flipHorizontal = false;
   bool _flipVertical = false;
 
+  bool _isPlaying = false;
+  bool get isPlaying => _isPlaying;
 
 
   EditorMode _mode = EditorMode.idle;
@@ -59,7 +62,6 @@ class VideoEditorProvider with ChangeNotifier {
   VideoPlayerController? get videoController => _videoController;
   List<VideoTrack> get videoTracks => _videoTracks;
   int get selectedTrackIndex => _selectedTrackIndex;
-  bool get isPlaying => _isPlaying;
   Duration get currentPosition => _currentPosition;  // Get current position
   String get currentTool => _currentTool;
   bool get showContextToolbar => _showContextToolbar;
@@ -67,6 +69,12 @@ class VideoEditorProvider with ChangeNotifier {
   double get rotation => _rotation;
   bool get flipHorizontal => _flipHorizontal;
   bool get flipVertical => _flipVertical;
+  bool freezeHeavyTasksDuringPlayback = true;
+  bool _isSwitchingClip = false;
+  bool isScrubbingTimeline = false;     // Current playing clip
+  VideoPlayerController? _nextClipController;  // Preloaded next clip
+  bool _userScrollingTimeline = false;
+
 
   final AudioManager audioManager = AudioManager();
   // ================= CAPCUT CAMERA =================
@@ -87,76 +95,119 @@ class VideoEditorProvider with ChangeNotifier {
   bool _isLoadingVideo = false;
   bool get isLoadingVideo => _isLoadingVideo;
   ScrollController get timelineScrollController => _timelineScrollController;
-  Timer? _playbackTimer;
+  final List<TextTrack> textTracks = [];
+  TextTrack? selectedText;
+
+
+  bool _isDraggingClip = false;
+
+  bool get isDraggingClip => _isDraggingClip;
+
+  set isDraggingClip(bool value) {
+    if (_isDraggingClip == value) return;
+    _isDraggingClip = value;
+    notifyListeners();
+  }
+
+  bool _isTrimming = false;
+  bool get isTrimming => _isTrimming;
+
+  void startTrimPreview() {
+    _isTrimming = true;
+    pause();
+  }
+
+  void pause() {
+    if (_videoController == null) return;
+
+    if (_videoController!.value.isPlaying) {
+      _videoController!.pause();
+      _isPlaying = false;
+      notifyListeners();
+    }
+  }
+
+  void endTrimPreview() {
+    _isTrimming = false;
+  }
+
+  void previewTrimStart(Duration start) {
+    _trimStart = snapToFrame(start);
+    _videoController?.seekTo(_trimStart);
+    notifyListeners();
+  }
+
+  void previewTrimEnd(Duration end) {
+    _trimEnd = snapToFrame(end);
+    notifyListeners();
+  }
+
+  Duration get globalPosition {
+    if (_videoController == null) return Duration.zero;
+
+    final clip = videoTracks[selectedTrackIndex];
+    return clip.startTime + _videoController!.value.position;
+  }
+
 
   void togglePlayPause() {
     if (_videoController == null) return;
 
-    if (_isPlaying) {
+    if (_videoController!.value.isPlaying) {
       _videoController!.pause();
-      _playbackTimer?.cancel();
+      _isPlaying = false;
     } else {
       _videoController!.play();
-      _startPlayheadTimer();
+      _isPlaying = true;
     }
 
-    _isPlaying = !_isPlaying;
     notifyListeners();
   }
 
-  void _startPlayheadTimer() {
-    _playbackTimer?.cancel();
-    _playbackTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (_videoController == null || !_videoController!.value.isInitialized) return;
-
-      final position = _videoController!.value.position;
-      final globalPos = _getGlobalPositionFromActiveClip(position);
-      _currentPosition = globalPos;
-
-      _checkAndSwitchClip();
-
-      // === SMOOTH CENTERED SCROLL LIKE CAPCUT ===
-      final targetOffset = globalPos.inMilliseconds / 1000.0 * pixelsPerSecond;
-      final maxOffset = timelineScrollController.position.maxScrollExtent;
-      final halfScreen = timelineScrollController.position.viewportDimension / 2;
-
-      final desiredOffset = (targetOffset - halfScreen).clamp(0.0, maxOffset);
-
-      // Smooth animated scroll
-      if ((timelineScrollController.offset - desiredOffset).abs() > 1.0) {
-        timelineScrollController.animateTo(
-          desiredOffset,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOutCubic,
-        );
-      }
-
-      notifyListeners();
-
-      if (globalPos >= totalTimelineDuration) {
-        togglePlayPause();
-      }
-    });
+  void seekTo(Duration time) {
+    if (_videoController == null) return;
+    _videoController!.seekTo(time);
   }
 
-  Duration _getGlobalPositionFromActiveClip(Duration localPos) {
-    // Find current active clip
-    for (final track in videoTracks) {
-      if (_currentPosition >= track.startTime && _currentPosition < track.endTime) {
-        return track.startTime + localPos;
-      }
-    }
-    return _currentPosition;
+
+  void updateActiveClip(Duration globalTime) {
+    final index = videoTracks.indexWhere(
+          (t) => globalTime >= t.startTime && globalTime < t.endTime,
+    );
+
+    if (index == selectedTrackIndex) return;
+
+    switchToClip(videoTracks[index], seekToGlobal: globalTime);
+  }
+
+  void _updatePosition() {
+    if (_videoController == null) return;
+
+    final pos = _videoController!.value.position;
+    _currentPosition = pos;
+    _currentTimeSeconds = pos.inMilliseconds / 1000.0;
+    _isPlaying = _videoController!.value.isPlaying;
+
+    notifyListeners();
   }
 
   Future<void> loadVideo(String path) async {
     final oldController = _videoController;
 
-    _isLoadingVideo = true;
+    final newController = VideoPlayerController.file(File(path));
+    await newController.initialize();
+
+    _videoController = newController;
+    _attachVideoListener(newController);
+
     notifyListeners();
 
-    _videoController = VideoPlayerController.file(File(path));
-    await _videoController!.initialize();
+    if (oldController != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        oldController.dispose();
+      });
+    }
+
     _videoController!.addListener(_updatePosition);
 
     // In loadVideo(), after initialize():
@@ -209,23 +260,6 @@ class VideoEditorProvider with ChangeNotifier {
     return maxEnd + 2; // padding
   }
 
-  void seekTo(Duration position) {
-    _currentPosition = position;
-    _videoController?.seekTo(position);
-
-    // Sync timeline scroll
-    final offset = position.inMilliseconds / 1000.0 * pixelsPerSecond;
-    if (timelineScrollController.hasClients) {
-      timelineScrollController.animateTo(
-        offset,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-      );
-    }
-
-    notifyListeners();
-  }
-
   void openTool(String tool) {
     _currentTool = tool;
     _showBottomSheet = true;
@@ -238,7 +272,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-// Make sure this exists and updates properly when scrolling
   void panTimeline(double dx) {
     timelineCameraSeconds -= dx / pixelsPerSecond;
     final max = totalTimelineSeconds - 5; // some padding
@@ -303,20 +336,36 @@ class VideoEditorProvider with ChangeNotifier {
     videoTracks.add(track);
     notifyListeners();
 
-    generateThumbnailsForAllClips(); // 🚀 parallel background loading
+    generateThumbnailsForAllClips();
   }
 
   // 🔹 DRAG CLIP
-  void moveClip(VideoTrack track, Duration newStart) {
-    final index = _videoTracks.indexWhere((t) => t.id == track.id);
+  void moveClip(VideoTrack clip, Duration newStart) {
+    final index = videoTracks.indexWhere((t) => t.id == clip.id);
     if (index == -1) return;
 
-    final updated = track.copyWith(
+    final oldStart = clip.startTime;
+    final delta = newStart - oldStart;
+
+    // 1️⃣ Move the video clip
+    final updatedClip = clip.copyWith(
       startTime: newStart,
-      endTime: newStart + track.duration,
+      endTime: newStart + clip.duration,
     );
 
-    _videoTracks[index] = updated;
+    videoTracks[index] = updatedClip;
+
+    // 2️⃣ Move linked audio tracks
+    for (final audio in audioTracks) {
+      if (audio.linkedClipId == clip.id) {
+        audio.start = newStart.inMilliseconds / 1000;
+      }
+    }
+
+    // 3️⃣ Re-sort timeline
+    videoTracks.sort((a, b) => a.startTime.compareTo(b.startTime));
+    audioTracks.sort((a, b) => a.start.compareTo(b.start));
+
     notifyListeners();
   }
 
@@ -325,17 +374,6 @@ class VideoEditorProvider with ChangeNotifier {
     audioTracks.add(track);
     notifyListeners();
   }
-
-  // 🔹 TOTAL TIMELINE
-  // double get totalTimelineSeconds {
-  //   double maxEnd = 0;
-  //   for (final v in videoTracks) {
-  //     maxEnd = maxEnd < v.endTime.inSeconds
-  //         ? v.endTime.inSeconds.toDouble()
-  //         : maxEnd;
-  //   }
-  //   return maxEnd + 2;
-  // }
 
   double _previewRotation = 0;
   bool _previewFlipH = false;
@@ -501,13 +539,19 @@ class VideoEditorProvider with ChangeNotifier {
     videoController!.setPlaybackSpeed(appliedSpeed);
   }
 
-  void _updatePosition() {
-    if (_videoController == null) return;
-    final pos = _videoController!.value.position;
-    _currentTimeSeconds = pos.inSeconds.toDouble();
-    _currentPosition = pos;
-    _isPlaying = _videoController!.value.isPlaying;
-    notifyListeners();
+  void selectCover() {
+    final pos = currentPosition;
+    for (final track in videoTracks) {
+      if (pos >= track.startTime && pos < track.endTime) {
+        _selectedCover = track.thumbnail;
+        notifyListeners();
+        return;
+      }
+    }
+    if (videoTracks.isNotEmpty) {
+      _selectedCover = videoTracks.first.thumbnail;
+      notifyListeners();
+    }
   }
 
   set videoTracks(List<VideoTrack> tracks) {
@@ -583,13 +627,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  void selectCover() {
-    if (_videoTracks.isNotEmpty && _selectedTrackIndex < _videoTracks.length) {
-      _selectedCover = _videoTracks[_selectedTrackIndex].thumbnail;
-      notifyListeners();
-    }
-  }
-
   // Crop / Fill state
   Rect _cropRect = const Rect.fromLTWH(0, 0, 1, 1); // Normalized 0-1
   double _cropZoom = 1.0; // Zoom level for fill
@@ -624,12 +661,17 @@ class VideoEditorProvider with ChangeNotifier {
     _videoController?.removeListener(_updateVideoPosition);
     _videoController?.dispose();
     _pendingThumbnailJobs.clear();
-    _playbackTimer?.cancel();
+    for (final track in audioTracks) {
+      track.player.dispose();
+    }
+
     super.dispose();
   }
 
   set currentTime(Duration time) {
-    currentTime = time;
+    _currentPosition = time;
+    _currentTimeSeconds = time.inMilliseconds / 1000.0;
+    _videoController?.seekTo(time);
     notifyListeners();
   }
 
@@ -768,31 +810,39 @@ class VideoEditorProvider with ChangeNotifier {
     required String videoPath,
     required Duration duration,
   }) async {
-    if (ThumbnailCache.has(videoPath)) {
-      return ThumbnailCache.get(videoPath);
+
+    if (freezeHeavyTasksDuringPlayback && _isPlaying) {
+      return <Uint8List>[];
     }
 
-    // Target: ~5 thumbnails per second of video (CapCut feel)
-    final int thumbnailsPerSecond = 5;
-    final int targetCount = (duration.inSeconds * thumbnailsPerSecond).clamp(20, 150);
+    if (ThumbnailCache.has(videoPath)) {
+      return ThumbnailCache.get(videoPath)!;
+    }
 
-    // Calculate interval in seconds
+    final int thumbnailsPerSecond = 3;
+    final int targetCount =
+    (duration.inSeconds * thumbnailsPerSecond).clamp(12, 80);
+
     final double intervalSeconds = duration.inSeconds / targetCount;
-
     final List<Uint8List> thumbs = [];
 
     for (int i = 0; i < targetCount; i++) {
+      if (_isPlaying) break;
+
       final double timeSeconds = i * intervalSeconds;
-      final uint8list = await VideoThumbnail.thumbnailData(
+
+      final data = await VideoThumbnail.thumbnailData(
         video: videoPath,
         imageFormat: ImageFormat.JPEG,
         timeMs: (timeSeconds * 1000).toInt(),
-        quality: 80,
-        maxWidth: 120, // Small but sharp enough
+        quality: 65,
+        maxWidth: 120,
       );
 
-      if (uint8list != null) {
-        thumbs.add(uint8list);
+      if (data != null) thumbs.add(data);
+
+      if (i % 2 == 0) {
+        await Future.delayed(const Duration(milliseconds: 16));
       }
     }
 
@@ -870,20 +920,30 @@ class VideoEditorProvider with ChangeNotifier {
 
   final List<Future<void>> _pendingThumbnailJobs = [];
 
-  void generateThumbnailsForAllClips() async {
-    _pendingThumbnailJobs.clear();
-    for (int i = 0; i < videoTracks.length; i++) {
-      final track = videoTracks[i];
+  Future<void> generateThumbnailsForAllClips() async {
+    for (final track in videoTracks) {
       if (track.timelineThumbnails.isNotEmpty) continue;
 
-      final job = generateClipThumbnails(
+      // Wait until NOT playing
+      while (_isPlaying) {
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
+
+      final thumbs = await generateClipThumbnails(
         videoPath: track.path,
         duration: track.duration,
-      ).then((thumbs) {
-        final updated = track.copyWith(timelineThumbnails: thumbs);
-        replaceTrack(i, updated);
-      });
-      _pendingThumbnailJobs.add(job);
+      );
+
+      final index =
+      videoTracks.indexWhere((t) => t.id == track.id);
+
+      if (index != -1) {
+        _videoTracks[index] =
+            _videoTracks[index].copyWith(
+              timelineThumbnails: thumbs,
+            );
+        notifyListeners();
+      }
     }
   }
 
@@ -938,12 +998,16 @@ class VideoEditorProvider with ChangeNotifier {
         await waveFile.delete();
       }
 
+      final player = AudioPlayer();
+      await player.setFilePath(file.path);
+
       final newTrack = AudioTrack(
         id: const Uuid().v4(),
         path: file.path,
         duration: durationSeconds,
         start: startSeconds,
-        waveform: waveform, // Can be null if extraction failed
+        waveform: waveform,
+        player: player,
       );
 
       audioTracks.add(newTrack);
@@ -1111,20 +1175,18 @@ class VideoEditorProvider with ChangeNotifier {
 
 
   double get timelineWorldWidth {
-    double maxEnd = 0;
+    if (videoTracks.isEmpty && audioTracks.isEmpty) return 2000;
 
+    double maxEnd = 0.0;
     for (final v in videoTracks) {
-      final end = v.endTime.inMilliseconds / 1000.0;
-      // seconds
-      if (end > maxEnd) maxEnd = end;
+      maxEnd = math.max(maxEnd, v.endTime.inMilliseconds / 1000.0);
     }
-
     for (final a in audioTracks) {
-      final end = a.start + a.duration;   // seconds
-      if (end > maxEnd) maxEnd = end;
+      maxEnd = math.max(maxEnd, a.start + a.duration);
     }
 
-    return (maxEnd * pixelsPerSecond) + 400;
+    // Ensure minimum width and generous right padding
+    return math.max((maxEnd * pixelsPerSecond) + 3000, 4000);
   }
 
   Future<void> loadTimelineThumbnails(VideoTrack track) async {
@@ -1170,16 +1232,22 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  List<TextTrack> textTracks = [];
-
-  TextTrack? selectedTextTrack;
-
   void addTextTrack(TextTrack track) {
     textTracks.add(track);
-    selectTextTrack(track.id);
+    selectedText = track;
     notifyListeners();
   }
 
+  void updateTextPosition(TextTrack track, Offset normalized) {
+    final index = textTracks.indexWhere((t) => t.id == track.id);
+    if (index == -1) return;
+
+    textTracks[index] = track.copyWith(position: normalized);
+    notifyListeners();
+  }
+
+  TextTrack? selectedTextTrack;
+  
   void selectTextTrack(String? id) {
     selectedTextTrack = textTracks.firstWhereOrNull((t) => t.id == id);
     notifyListeners();
@@ -1285,32 +1353,136 @@ class VideoEditorProvider with ChangeNotifier {
     }
   }
 
-  void _checkAndSwitchClip() {
-    final pos = currentPosition;
+  void _attachVideoListener(VideoPlayerController controller) {
+    controller.removeListener(_updateVideoPosition);
 
-    // Find which video track is active at current position
-    VideoTrack? activeTrack;
-    for (final track in videoTracks) {
-      if (pos >= track.startTime && pos < track.endTime) {
-        activeTrack = track;
-        break;
+    controller.addListener(() {
+      if (!controller.value.isInitialized) return;
+
+      // 🔒 TRIM LOOP GUARD (CRITICAL)
+      if (_isTrimming && controller.value.isPlaying) {
+        final pos = controller.value.position;
+        if (pos >= _trimEnd) {
+          controller.seekTo(_trimStart);
+          return;
+        }
       }
-    }
 
-    if (activeTrack == null) {
-      _videoController?.pause();
+      final track = videoTracks[selectedTrackIndex];
+      final localPos = controller.value.position;
+      final localDuration = controller.value.duration;
+
+      _currentPosition = track.startTime + localPos;
+      _syncAudioTracks(_currentPosition);
+
+      _currentTimeSeconds = _currentPosition.inMilliseconds / 1000.0;
+
+      _isPlaying = controller.value.isPlaying;
+
+      if (!_isSwitchingClip &&
+          localPos >= localDuration - const Duration(milliseconds: 16)) {
+        _handleClipEnd();
+      }
+
+      if (_isPlaying &&
+          !isDraggingClip &&
+          !isScrubbingTimeline &&
+          timelineScrollController.hasClients) {
+        final viewportCenter =
+            timelineScrollController.position.viewportDimension / 2;
+
+        final offset =
+            (_currentPosition.inMilliseconds / 1000.0) *
+                pixelsPerSecond -
+                viewportCenter;
+
+        timelineScrollController.jumpTo(
+          offset.clamp(
+            0.0,
+            timelineScrollController.position.maxScrollExtent,
+          ),
+        );
+      }
+
+      notifyListeners();
+    });
+  }
+
+  Future<void> _handleClipEnd() async {
+    if (_isSwitchingClip) return;
+
+    final nextIndex = selectedTrackIndex + 1;
+
+    if (nextIndex >= videoTracks.length) {
+      // End of timeline
+      _isPlaying = false;
+      notifyListeners();
       return;
     }
 
-    // If different from current, switch
-    if (_videoController == null || _videoController!.dataSource != activeTrack.path) {
-      _switchToClip(activeTrack);
+    _isSwitchingClip = true;
+
+    try {
+      selectedTrackIndex = nextIndex;
+
+      await switchToClip(
+        videoTracks[nextIndex],
+        seekToGlobal: videoTracks[nextIndex].startTime,
+      );
+    } finally {
+      _isSwitchingClip = false;
+    }
+  }
+
+  // =================== SWITCH CLIPS ===================
+  Future<void> switchToClip(VideoTrack track, {Duration? seekToGlobal}) async {
+    if (_videoController != null) {
+      // Pause and remove listener before disposing
+      _videoController!.pause();
+      _videoController!.removeListener(_updatePosition);
+
+      final old = _videoController;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        old?.dispose();
+      });
+
     }
 
-    // Seek to relative position within clip
-    final relativePos = pos - activeTrack.startTime;
-    _videoController?.seekTo(relativePos);
+    // Create new controller
+    final controller = VideoPlayerController.file(File(track.path));
+    _videoController = controller;
+
+    _isLoadingVideo = true;
+    notifyListeners();
+
+    try {
+      await controller.initialize();
+
+      // Attach listener
+      _attachVideoListener(controller);
+
+      // Seek to proper position
+      if (seekToGlobal != null) {
+        final clipPosition = seekToGlobal - track.startTime;
+        if (clipPosition >= Duration.zero && clipPosition <= track.duration) {
+          controller.seekTo(clipPosition);
+        }
+      }
+
+      // Resume playback automatically if playing
+      if (_isPlaying) {
+        await controller.play();
+      }
+    } catch (e, st) {
+      debugPrint('❌ Error switching clip: $e');
+      debugPrint(st.toString());
+    } finally {
+      _isLoadingVideo = false;
+      notifyListeners();
+    }
   }
+
 
   Future<void> _switchToClip(VideoTrack track) async {
     final oldController = _videoController;
@@ -1332,4 +1504,103 @@ class VideoEditorProvider with ChangeNotifier {
       // Future.delayed(const Duration(milliseconds: 100), () => oldController.dispose());
     }
   }
+
+  /// Add multiple videos sequentially to the timeline
+  Future<void> addMultipleVideosSequentially(List<Map<String, dynamic>> videosWithThumbs) async {
+    _videoTracks.clear();
+    _selectedTrackIndex = 0;
+
+    Duration currentStart = Duration.zero;
+
+    for (final videoData in videosWithThumbs) {
+      final XFile xfile = videoData['file'];
+      final Uint8List? thumb = videoData['thumbnail'];
+
+      // Initialize video controller temporarily to get duration
+      final tempController = VideoPlayerController.file(File(xfile.path));
+      await tempController.initialize();
+      final duration = tempController.value.duration;
+      await tempController.dispose();
+
+      final track = VideoTrack(
+        id: const Uuid().v4(),
+        path: xfile.path,
+        startTime: currentStart,
+        endTime: currentStart + duration,
+        thumbnail: thumb,
+        timelineThumbnails: [], // Will be generated later
+      );
+
+      _videoTracks.add(track);
+      currentStart += duration;
+    }
+
+    // Generate thumbnails for all clips in background
+    generateThumbnailsForAllClips();
+
+    // Load the FIRST clip into preview
+    if (_videoTracks.isNotEmpty) {
+      await _switchToClip(_videoTracks.first);
+      _selectedTrackIndex = 0;
+      selectedVideoTrackId = _videoTracks.first.id;
+    }
+
+    notifyListeners();
+  }
+
+
+  void clampTrimToClip(VideoTrack track) {
+    if (_trimStart < Duration.zero) {
+      _trimStart = Duration.zero;
+    }
+    if (_trimEnd > track.duration) {
+      _trimEnd = track.duration;
+    }
+    if (_trimEnd <= _trimStart) {
+      _trimEnd = _trimStart + const Duration(milliseconds: 33);
+    }
+  }
+
+  void _syncAudioTracks(Duration timelinePosition) {
+    for (final track in audioTracks) {
+      final audioStart = Duration(
+        milliseconds: (track.start * 1000).round(),
+      );
+      final audioEnd = audioStart +
+          Duration(milliseconds: (track.duration * 1000).round());
+
+      final isInside =
+          timelinePosition >= audioStart &&
+              timelinePosition < audioEnd;
+
+      if (!isInside) {
+        // 🔇 Ensure silence outside range
+        if (track.player.playing) {
+          track.player.pause();
+        }
+        continue;
+      }
+
+      // 🎯 Compute local audio offset
+      final localAudioPos = timelinePosition - audioStart;
+
+      // 🔄 Seek if drifted (important)
+      final current = track.player.position;
+      if ((current - localAudioPos).abs() >
+          const Duration(milliseconds: 40)) {
+        track.player.seek(localAudioPos);
+      }
+
+      // ▶️ Play only if timeline is playing
+      if (_isPlaying && !track.player.playing) {
+        track.player.play();
+      }
+
+      // ⏸ Pause if timeline paused
+      if (!_isPlaying && track.player.playing) {
+        track.player.pause();
+      }
+    }
+  }
+
 }

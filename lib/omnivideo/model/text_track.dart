@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 class TextTrack {
@@ -11,7 +12,7 @@ class TextTrack {
   TextAlign alignment;
   Offset position; // normalized 0-1
   double rotation;
-  // Animation, style, etc. later
+  double scale;
 
   TextTrack({
     required this.id,
@@ -24,7 +25,10 @@ class TextTrack {
     this.alignment = TextAlign.center,
     this.position = const Offset(0.5, 0.5),
     this.rotation = 0.0,
+    this.scale = 1.0,
   });
+
+  Duration get endTime => startTime + duration;
 
   TextTrack copyWith({
     String? text,
@@ -36,6 +40,7 @@ class TextTrack {
     TextAlign? alignment,
     Offset? position,
     double? rotation,
+    double? scale,
   }) {
     return TextTrack(
       id: id,
@@ -48,6 +53,7 @@ class TextTrack {
       alignment: alignment ?? this.alignment,
       position: position ?? this.position,
       rotation: rotation ?? this.rotation,
+      scale: scale ?? this.scale,
     );
   }
 }

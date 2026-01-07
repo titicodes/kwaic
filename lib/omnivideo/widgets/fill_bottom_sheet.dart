@@ -45,58 +45,71 @@ class _FillBottomSheetState extends State<FillBottomSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 180,
-      color: Colors.black,
-      child: Column(
-        children: [
-          // Header
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: widget.onClose,
-                ),
-                const Text(
-                  'Fill',
-                  style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                Row(
-                  children: [
-                    Text(
-                      '$cropPercentage%',
-                      style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(width: 16),
-                    IconButton(
-                      icon: const Icon(Icons.check, color: Colors.white),
-                      onPressed: widget.onApply,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+    final bottomInset = MediaQuery.of(context).padding.bottom;
 
-          // Interactive mini preview
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: CropPreview(
-                controller: Provider.of<VideoEditorProvider>(context).videoController!,
-                crop: _localCrop,
-                zoom: _localZoom,
-                onChanged: _updateCrop,
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: EdgeInsets.only(bottom: bottomInset),
+        decoration: const BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // HEADER
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: widget.onClose,
+                  ),
+                  const Text(
+                    'Fill',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  Row(
+                    children: [
+                      Text(
+                        '$cropPercentage%',
+                        style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(width: 12),
+                      IconButton(
+                        icon: const Icon(Icons.check, color: Colors.white),
+                        onPressed: widget.onApply,
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
-          ),
-        ],
+
+            // PREVIEW (CONSTRAINED)
+            SizedBox(
+              height: 220,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: CropPreview(
+                  controller: context.read<VideoEditorProvider>().videoController!,
+                  crop: _localCrop,
+                  zoom: _localZoom,
+                  onChanged: _updateCrop,
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 12),
+          ],
+        ),
       ),
     );
   }
+
 }
 
 // Keep the CropPreview and _CropOverlayPainter classes exactly as before
@@ -178,9 +191,10 @@ class _CropPreviewState extends State<CropPreview> {
             child: VideoPlayer(widget.controller),
           ),
           IgnorePointer(
-            child: CustomPaint(
-              painter: _CropOverlayPainter(cropPixels, _videoSize!),
+            child:CustomPaint(
+              painter: _CropOverlayPainter(cropPixels),
             ),
+
           ),
         ],
       ),
@@ -188,15 +202,15 @@ class _CropPreviewState extends State<CropPreview> {
   }
 }
 
-class _CropOverlayPainter extends CustomPainter {
-  final Rect cropPixels;
-  final Size videoSize;
 
-  _CropOverlayPainter(this.cropPixels, this.videoSize);
+class _CropOverlayPainter extends CustomPainter {
+  final Rect cropRect;
+
+  _CropOverlayPainter(this.cropRect);
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.black.withOpacity(0.6);
+    final dim = Paint()..color = Colors.black.withOpacity(0.6);
     final border = Paint()
       ..color = Colors.white
       ..strokeWidth = 3
@@ -204,13 +218,13 @@ class _CropOverlayPainter extends CustomPainter {
 
     final path = Path()
       ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
-      ..addRect(cropPixels)
+      ..addRect(cropRect)
       ..fillType = PathFillType.evenOdd;
 
-    canvas.drawPath(path, paint);
-    canvas.drawRect(cropPixels, border);
+    canvas.drawPath(path, dim);
+    canvas.drawRect(cropRect, border);
   }
 
   @override
-  bool shouldRepaint(covariant _CropOverlayPainter old) => true;
+  bool shouldRepaint(_) => true;
 }

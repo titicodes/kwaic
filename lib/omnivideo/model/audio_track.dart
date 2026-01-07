@@ -1,23 +1,25 @@
-
-
-import 'dart:typed_data';
-
+import 'package:just_audio/just_audio.dart';
 import 'package:just_waveform/just_waveform.dart';
 
 class AudioTrack {
   final String id;
   final String path;
   final double duration;
-  double start;                 // seconds on timeline
-  Waveform? waveform;           // ← changed to Waveform?
+  double start;
+  Waveform? waveform;
+
+  final String? linkedClipId; // 🔥 ADD THIS
+  final AudioPlayer player;
 
   AudioTrack({
     required this.id,
     required this.path,
     required this.duration,
     required this.start,
-    this.waveform,              // nullable
-  });
+    this.waveform,
+    this.linkedClipId, // 🔥 ADD THIS
+    AudioPlayer? player,
+  }) : player = player ?? AudioPlayer();
 
   AudioTrack copyWith({
     double? start,
@@ -29,9 +31,14 @@ class AudioTrack {
       duration: duration,
       start: start ?? this.start,
       waveform: waveform ?? this.waveform,
+      linkedClipId: linkedClipId,
+      player: player,
     );
   }
 
-  Duration get startTime => Duration(milliseconds: (start * 1000).round());
-  Duration get uiDuration => Duration(milliseconds: (duration * 1000).round());
+  Duration get startTime =>
+      Duration(milliseconds: (start * 1000).round());
+
+  Duration get uiDuration =>
+      Duration(milliseconds: (duration * 1000).round());
 }

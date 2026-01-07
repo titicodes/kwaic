@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:kwaic/omnivideo/model/video_track.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
@@ -34,48 +36,73 @@ class VideoEditorScreens extends StatefulWidget {
 }
 
 class _VideoEditorScreensState extends State<VideoEditorScreens> {
-  late List<VideoTrack> _videoTracks;
-  final ScrollController _timelineScrollController = ScrollController();
-  int _selectedTrackIndex = 0;
+
 
   @override
   void initState() {
     super.initState();
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _initializeVideos();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeVideos();
     });
   }
-
 
   Future<void> _initializeVideos() async {
     final provider = context.read<VideoEditorProvider>();
 
-    _videoTracks = widget.videosWithThumbs.asMap().entries.map((entry) {
-      final index = entry.key;
-      final video = entry.value;
-      return VideoTrack(
-        id: '${widget.projectId}_$index',
-        path: video['file'].path,
-        startTime: Duration.zero,
-        endTime: const Duration(seconds: 30), // fixed length is fine for now
-        thumbnail: video['thumbnail'],
-        timelineThumbnails: [],
-      );
-    }).toList();
+    provider.videoTracks = [];
 
-    provider.videoTracks = _videoTracks;
+    Duration currentStart = Duration.zero;
 
-    if (_videoTracks.isNotEmpty) {
+    for (int i = 0; i < widget.videosWithThumbs.length; i++) {
+      final videoData = widget.videosWithThumbs[i];
+      final XFile xfile = videoData['file'];
+      final Uint8List? thumbnail = videoData['thumbnail'];
+
+      final tempController = VideoPlayerController.file(File(xfile.path));
+      try {
+        await tempController.initialize();
+        final Duration videoDuration = tempController.value.duration;
+
+        final VideoTrack track = VideoTrack(
+          id: '${widget.projectId}_$i',
+          path: xfile.path,
+          startTime: currentStart,
+          endTime: currentStart + videoDuration,
+          thumbnail: thumbnail,
+          timelineThumbnails: [],
+        );
+
+        provider.videoTracks.add(track);
+        currentStart += videoDuration;
+      } finally {
+        await tempController.dispose();
+      }
+    }
+
+    provider.notifyListeners();
+
+    if (provider.videoTracks.isNotEmpty) {
+      final firstTrack = provider.videoTracks.first;
+
+      // Use the clean switch method
+      await provider.switchToClip(firstTrack);
+
       provider.selectedTrackIndex = 0;
-      provider.selectVideoTrack(_videoTracks[0].id);
-      await provider.loadVideo(_videoTracks[0].path); // ← This loads and shows video immediately
+      provider.selectVideoTrack(firstTrack.id);
+
+      provider.generateThumbnailsForAllClips();
+
+      // Start at beginning
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        provider.timelineScrollController.jumpTo(0.0);
+        provider.seekTo(Duration.zero);
+      });
     }
   }
 
   @override
   void dispose() {
-    _timelineScrollController.dispose();
+    //_timelineScrollController.dispose();
     super.dispose();
   }
 
@@ -96,36 +123,9 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
                     Expanded(
                       child: Container(
                         color: Colors.black,
-                        child:
-                            provider.videoController != null &&
-                                    provider
-                                        .videoController!
-                                        .value
-                                        .isInitialized
-                                ? VideoPlayerWidget(
-                                  controller: provider.videoController!,
-                                )
-                                : Container(
-                                  color: Colors.black,
-                                  child: Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        if (provider.isLoadingVideo)
-                                          const CircularProgressIndicator(
-                                            color: Colors.white,
-                                          )
-                                        else
-                                          const Text(
-                                            "Select a clip to preview",
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
+                        child: VideoPlayerWidget(
+                          controller: provider.videoController ?? VideoPlayerController.file(File('')), // dummy if null
+                        ),
                       ),
                     ),
                     _PlaybackControls(provider: provider),

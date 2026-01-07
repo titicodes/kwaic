@@ -10,6 +10,9 @@ class VideoTrack {
 
   final Uint8List? thumbnail;
   final List<Uint8List> timelineThumbnails;
+  bool thumbsRequested = false;
+  bool thumbsCompleted = false;
+
 
   // ===== Transform (CapCut-style, normalized) =====
   final Offset position; // (-1..1) relative to center

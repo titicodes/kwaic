@@ -17,7 +17,7 @@ class AudioTrackRow extends StatelessWidget {
     final worldWidth = provider.totalTimelineSeconds * pixelsPerSecond;
 
     return SizedBox(
-      height: 50,
+      height: 40,
       width: worldWidth,
       child: Stack(
         children: provider.audioTracks.map((track) {

@@ -11,7 +11,7 @@ class EditContextToolbar extends StatelessWidget {
     final provider = Provider.of<VideoEditorProvider>(context);
     final bool hasSelection = provider.selectedVideoTrackId != null || provider.selectedAudioTrack != null;
 
-    // Only show toolbar if something is selected
+    // Only show if something is selected
     if (!hasSelection) return const SizedBox.shrink();
 
     final bool isVideo = provider.selectedVideoTrackId != null;
@@ -25,19 +25,20 @@ class EditContextToolbar extends StatelessWidget {
         child: Row(
           children: [
             const SizedBox(width: 16),
-            // Common tools for both video and audio
+            // Common tools
             _tool(Icons.content_cut, 'Trim', () => provider.selectTool('trim')),
             const SizedBox(width: 12),
             _tool(Icons.call_split, 'Split', () {
               final pos = provider.currentPosition;
-              if (isVideo) provider.splitVideoAt(pos);
-              if (isAudio) provider.splitAudioAt(pos);
+              if (provider.selectedVideoTrackId != null) {
+                provider.splitVideoAt(pos);
+              } else if (provider.selectedAudioTrack != null) {
+                provider.splitAudioAt(pos);
+              }
             }),
             const SizedBox(width: 12),
             _tool(Icons.swap_horiz, 'Replace', () {
-              if (isAudio) {
-                provider.openTool('audio'); // Re-open audio sheet in replace mode
-              }
+              if (isAudio) provider.openTool('audio'); // Replace mode
               // Video replace can be added later
             }),
             const SizedBox(width: 12),
@@ -51,7 +52,6 @@ class EditContextToolbar extends StatelessWidget {
               _tool(Icons.fit_screen, 'Fill', () => provider.selectTool('fill')),
               const SizedBox(width: 12),
             ],
-
             const SizedBox(width: 16),
           ],
         ),
@@ -63,7 +63,7 @@ class EditContextToolbar extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 4),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -77,10 +77,7 @@ class EditContextToolbar extends StatelessWidget {
               child: Icon(icon, color: Colors.white, size: 26),
             ),
             const SizedBox(height: 4),
-            Text(
-              label,
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-            ),
+            Text(label, style: const TextStyle(color: Colors.white, fontSize: 12)),
           ],
         ),
       ),

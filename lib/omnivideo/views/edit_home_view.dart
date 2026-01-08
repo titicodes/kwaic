@@ -123,9 +123,7 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
                     Expanded(
                       child: Container(
                         color: Colors.black,
-                        child: VideoPlayerWidget(
-                          controller: provider.videoController ?? VideoPlayerController.file(File('')), // dummy if null
-                        ),
+                        child: const VideoPlayerWidget(),
                       ),
                     ),
                     _PlaybackControls(provider: provider),

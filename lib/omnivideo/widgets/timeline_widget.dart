@@ -217,7 +217,7 @@ class VideoClipsRow extends StatelessWidget {
     final provider = context.watch<VideoEditorProvider>();
 
     return SizedBox(
-      height: 60,
+      height: 50,
       child: Stack(
         children: provider.videoTracks.asMap().entries.map((entry) {
           final int index = entry.key;

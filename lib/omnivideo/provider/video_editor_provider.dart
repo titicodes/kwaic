@@ -153,6 +153,56 @@ class VideoEditorProvider with ChangeNotifier {
     return clip.startTime + _videoController!.value.position;
   }
 
+  Future<void> _handleClipEnd() async {
+    if (_isSwitchingClip) return;
+
+    final nextIndex = selectedTrackIndex + 1;
+    if (nextIndex >= videoTracks.length) {
+      pause();
+      return;
+    }
+
+    _isSwitchingClip = true;
+    selectedTrackIndex = nextIndex;
+    await switchToClip(videoTracks[nextIndex]);
+    _isSwitchingClip = false;
+  }
+
+  Future<void> switchToClip(VideoTrack track, {Duration? seekToGlobal}) async {
+    // Dispose old controller safely
+    final old = _videoController;
+    if (old != null) {
+      old.pause();
+      old.removeListener(_updatePosition);
+      WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+    }
+
+    // Create and initialize new one
+    final controller = VideoPlayerController.file(File(track.path));
+    _videoController = controller;
+    _isLoadingVideo = true;
+    notifyListeners();
+
+    try {
+      await controller.initialize();
+      _attachVideoListener(controller);
+
+      // Seek to correct position
+      if (seekToGlobal != null) {
+        final localPos = seekToGlobal - track.startTime;
+        if (localPos >= Duration.zero && localPos <= track.duration) {
+          await controller.seekTo(localPos);
+        }
+      }
+
+      if (_isPlaying) await controller.play();
+    } catch (e) {
+      debugPrint('Switch clip error: $e');
+    } finally {
+      _isLoadingVideo = false;
+      notifyListeners();
+    }
+  }
   void togglePlayPause() {
     if (_videoController == null) return;
     if (_videoController!.value.isPlaying) {
@@ -164,37 +214,55 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  void selectAudio(AudioTrack track) {
+    selectedAudioTrack = track;
+    selectedVideoTrackId = null;
+    selectedTextTrack = null;
+    showToolbar(); // Only show when user taps
+    notifyListeners();
+  }
+
+  void selectTextTrack(String? id) {
+    selectedTextTrack = textTracks.firstWhereOrNull((t) => t.id == id);
+    selectedVideoTrackId = null;
+    selectedAudioTrack = null;
+    if (selectedTextTrack != null) {
+      showToolbar(); // Show toolbar when text is tapped
+    }
+    notifyListeners();
+  }
+
   void seekTo(Duration time) {
     if (_videoController == null) return;
     _videoController!.seekTo(time);
   }
 
   void selectVideoTrack(String? trackId) {
+    if (trackId == null) return;
+
     selectedVideoTrackId = trackId;
     selectedAudioTrack = null;
-    if (trackId != null) {
-      selectedTrackIndex = videoTracks.indexWhere((t) => t.id == trackId);
+
+    final index = videoTracks.indexWhere((t) => t.id == trackId);
+    if (index != -1) {
+      selectedTrackIndex = index;
+      switchToClip(videoTracks[index]); // Preview shows tapped clip
     }
-    showToolbar(); // ← Force toolbar to appear
+
+    showToolbar(); // Only now — because user tapped
     notifyListeners();
   }
 
-  void selectAudio(AudioTrack track) {
-    selectedAudioTrack = track;
-    selectedVideoTrackId = null;
-    showToolbar(); // ← Force toolbar to appear
-    notifyListeners();
-  }
 
-  void updateActiveClip(Duration globalTime) {
-    final index = videoTracks.indexWhere(
-          (t) => globalTime >= t.startTime && globalTime < t.endTime,
-    );
-
-    if (index == selectedTrackIndex) return;
-
-    switchToClip(videoTracks[index], seekToGlobal: globalTime);
-  }
+  // void updateActiveClip(Duration globalTime) {
+  //   final index = videoTracks.indexWhere(
+  //         (t) => globalTime >= t.startTime && globalTime < t.endTime,
+  //   );
+  //
+  //   if (index == selectedTrackIndex) return;
+  //
+  //   switchToClip(videoTracks[index], seekToGlobal: globalTime);
+  // }
 
   void _updatePosition() {
     if (_videoController == null) return;
@@ -708,6 +776,31 @@ class VideoEditorProvider with ChangeNotifier {
   Duration get trimStart => _trimStart;
   Duration get trimEnd => _trimEnd;
 
+  TextTrack? selectedTextTrack;
+
+  void addTextTrack(TextTrack track) {
+    textTracks.add(track);
+    selectedTextTrack = track;
+    notifyListeners();
+  }
+
+  void updateTextTrack(TextTrack updated) {
+    final index = textTracks.indexWhere((t) => t.id == updated.id);
+    if (index != -1) {
+      textTracks[index] = updated;
+      if (selectedTextTrack?.id == updated.id) {
+        selectedTextTrack = updated;
+      }
+      notifyListeners();
+    }
+  }
+
+  void deleteTextTrack(String id) {
+    textTracks.removeWhere((t) => t.id == id);
+    if (selectedTextTrack?.id == id) selectedTextTrack = null;
+    notifyListeners();
+  }
+
 
   // Trim video using FFmpeg
   Future<bool> trimVideo({
@@ -1220,36 +1313,11 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  void addTextTrack(TextTrack track) {
-    textTracks.add(track);
-    selectedText = track;
-    notifyListeners();
-  }
-
   void updateTextPosition(TextTrack track, Offset normalized) {
     final index = textTracks.indexWhere((t) => t.id == track.id);
     if (index == -1) return;
 
     textTracks[index] = track.copyWith(position: normalized);
-    notifyListeners();
-  }
-
-  TextTrack? selectedTextTrack;
-  
-  void selectTextTrack(String? id) {
-    selectedTextTrack = textTracks.firstWhereOrNull((t) => t.id == id);
-    notifyListeners();
-  }
-
-  void updateTextTrack(TextTrack updated) {
-    final index = textTracks.indexWhere((t) => t.id == updated.id);
-    if (index != -1) textTracks[index] = updated;
-    notifyListeners();
-  }
-
-  void deleteTextTrack(String id) {
-    textTracks.removeWhere((t) => t.id == id);
-    if (selectedTextTrack?.id == id) selectedTextTrack = null;
     notifyListeners();
   }
 
@@ -1396,70 +1464,6 @@ class VideoEditorProvider with ChangeNotifier {
     });
   }
 
-  Future<void> _handleClipEnd() async {
-    if (_isSwitchingClip) return;
-
-    final nextIndex = selectedTrackIndex + 1;
-    if (nextIndex >= videoTracks.length) {
-      _isPlaying = false;
-      notifyListeners();
-      return;
-    }
-
-    _isSwitchingClip = true;
-    selectedTrackIndex = nextIndex;
-    await switchToClip(videoTracks[nextIndex]);
-    _isSwitchingClip = false;
-  }
-  // =================== SWITCH CLIPS ===================
-  Future<void> switchToClip(VideoTrack track, {Duration? seekToGlobal}) async {
-    if (_videoController != null) {
-      // Pause and remove listener before disposing
-      _videoController!.pause();
-      _videoController!.removeListener(_updatePosition);
-
-      final old = _videoController;
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        old?.dispose();
-      });
-
-    }
-
-    // Create new controller
-    final controller = VideoPlayerController.file(File(track.path));
-    _videoController = controller;
-
-    _isLoadingVideo = true;
-    notifyListeners();
-
-    try {
-      await controller.initialize();
-
-      // Attach listener
-      _attachVideoListener(controller);
-
-      // Seek to proper position
-      if (seekToGlobal != null) {
-        final clipPosition = seekToGlobal - track.startTime;
-        if (clipPosition >= Duration.zero && clipPosition <= track.duration) {
-          controller.seekTo(clipPosition);
-        }
-      }
-
-      // Resume playback automatically if playing
-      if (_isPlaying) {
-        await controller.play();
-      }
-    } catch (e, st) {
-      debugPrint('❌ Error switching clip: $e');
-      debugPrint(st.toString());
-    } finally {
-      _isLoadingVideo = false;
-      notifyListeners();
-    }
-  }
-
 
   Future<void> _switchToClip(VideoTrack track) async {
     final oldController = _videoController;
@@ -1515,13 +1519,13 @@ class VideoEditorProvider with ChangeNotifier {
     // Generate thumbnails for all clips in background
     generateThumbnailsForAllClips();
 
-    // Load the FIRST clip into preview
+    // After loading first clip
     if (_videoTracks.isNotEmpty) {
       await _switchToClip(_videoTracks.first);
       _selectedTrackIndex = 0;
-      selectedVideoTrackId = _videoTracks.first.id;
+      // selectedVideoTrackId = _videoTracks.first.id;  ← REMOVE THIS LINE
+      // DO NOT auto-select or show toolbar
     }
-
     notifyListeners();
   }
 

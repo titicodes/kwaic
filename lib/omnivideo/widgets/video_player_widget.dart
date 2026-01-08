@@ -1,193 +1,147 @@
+// widgets/video_player_widget.dart
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:provider/provider.dart';
 import '../model/video_track.dart';
+import '../model/text_track.dart';
 import '../provider/video_editor_provider.dart';
 import 'draggable_resizable_text.dart';
 
 class VideoPlayerWidget extends StatelessWidget {
-  const VideoPlayerWidget({super.key, required this.controller});
-
-  final VideoPlayerController?
-  controller; // Can be null briefly during switches
-
-  // Helper: Find active track based on current global position
-  VideoTrack? _getActiveTrack(VideoEditorProvider provider) {
-    final pos = provider.currentPosition;
-    for (final track in provider.videoTracks) {
-      if (pos >= track.startTime && pos < track.endTime) {
-        return track;
-      }
-    }
-    // Fallback to first track if no match (e.g. at end)
-    return provider.videoTracks.isNotEmpty ? provider.videoTracks.first : null;
-  }
+  const VideoPlayerWidget({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Consumer<VideoEditorProvider>(
       builder: (context, provider, _) {
-        // Find currently active clip
-        final VideoTrack? activeTrack = _getActiveTrack(provider);
-        final bool isInitialized =
-            controller != null && controller!.value.isInitialized;
-        final Size videoSize = isInitialized ? controller!.value.size : Size.zero;
+        final VideoPlayerController? controller = provider.videoController;
+        final bool isInitialized = controller != null && controller.value.isInitialized;
+        final Size videoSize = isInitialized ? controller.value.size : const Size(720, 1280);
 
-        final controllerSafe =
-            controller != null &&
-                controller!.value.isInitialized &&
-                !provider.isLoadingVideo;
+        // Find currently playing video track
+        VideoTrack? activeTrack;
+        for (final track in provider.videoTracks) {
+          if (provider.currentPosition >= track.startTime &&
+              provider.currentPosition < track.endTime) {
+            activeTrack = track;
+            break;
+          }
+        }
+        activeTrack ??= provider.videoTracks.firstOrNull;
 
-        // Fallback to first clip if no active
-        final VideoTrack? currentTrack =
-            activeTrack ?? provider.videoTracks.firstOrNull;
-
-        if (currentTrack == null) {
+        if (activeTrack == null || !isInitialized) {
           return Container(
             color: Colors.black,
             child: const Center(
               child: Text(
-                "No video clips added",
-                style: TextStyle(color: Colors.white70, fontSize: 16),
+                "No video clips",
+                style: TextStyle(color: Colors.white70, fontSize: 18),
               ),
             ),
           );
         }
 
-        // Transform values
-        final double effectiveRotation =
-        provider.currentTool == 'rotate'
-            ? currentTrack.rotation + provider.rotation
-            : currentTrack.rotation;
+        // Apply live preview transforms (rotate/flip/fill) if tool is open
+        final double rotation = provider.currentTool == 'rotate'
+            ? activeTrack.rotation + provider.rotation
+            : activeTrack.rotation;
 
-        final bool effectiveFlipH =
-        provider.currentTool == 'flip'
+        final bool flipH = provider.currentTool == 'flip'
             ? provider.flipHorizontal
-            : currentTrack.flipHorizontal;
+            : activeTrack.flipHorizontal;
 
-        final bool effectiveFlipV =
-        provider.currentTool == 'flip'
+        final bool flipV = provider.currentTool == 'flip'
             ? provider.flipVertical
-            : currentTrack.flipVertical;
+            : activeTrack.flipVertical;
 
-        final Rect effectiveCrop =
-        provider.currentTool == 'fill'
+        final Rect cropRect = provider.currentTool == 'fill'
             ? provider.previewCropRect
-            : currentTrack.cropRect;
+            : activeTrack.cropRect;
 
-        final double effectiveZoom =
-        provider.currentTool == 'fill'
+        final double cropZoom = provider.currentTool == 'fill'
             ? provider.previewCropZoom
-            : currentTrack.cropZoom;
+            : activeTrack.cropZoom;
 
         return Container(
           color: Colors.black,
           padding: const EdgeInsets.all(16),
           child: Center(
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                // Background thumbnail
-                if (currentTrack.thumbnail != null)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.memory(
-                      currentTrack.thumbnail!,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: AspectRatio(
+                aspectRatio: controller.value.aspectRatio,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // Background thumbnail (blurred or static)
+                    if (activeTrack.thumbnail != null)
+                      Image.memory(
+                        activeTrack.thumbnail!,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                      ),
+
+                    // Video with transforms
+                    FittedBox(
                       fit: BoxFit.contain,
-                      width: double.infinity,
-                      height: double.infinity,
-                      gaplessPlayback: true,
-                    ),
-                  ),
-
-                // Video + text overlay
-                if (controllerSafe)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: AspectRatio(
-                      aspectRatio: controller!.value.aspectRatio,
-                      child: FittedBox(
-                        fit: BoxFit.contain,
-                        child: SizedBox(
-                          width: videoSize.width,
-                          height: videoSize.height,
-                          child: Stack(
-                            children: [
-                              // Video clip (with all transforms)
-                              Transform(
-                                alignment: Alignment.center,
-                                transform: Matrix4.identity()
-                                  ..translate(
-                                    currentTrack.position.dx *
-                                        videoSize.width / 2,
-                                    currentTrack.position.dy *
-                                        videoSize.height / 2,
-                                  )
-                                  ..scale(currentTrack.scale)
-                                  ..rotateZ(effectiveRotation * 3.14159 / 180)
-                                  ..scale(
-                                    effectiveFlipH ? -1.0 : 1.0,
-                                    effectiveFlipV ? -1.0 : 1.0,
-                                  ),
-                                child: _buildCropOverlay(
-                                  effectiveCrop,
-                                  effectiveZoom,
-                                  videoSize,
-                                  controller!,
-                                ),
-                              ),
-
-                              // Draggable/resizable text overlays
-                              // Text overlays (synced to global currentPosition)
-                              Selector<VideoEditorProvider, Duration>(
-                                selector: (_, p) => p.currentPosition,
-                                builder: (_, currentTime, __) {
-                                  final provider = context.read<VideoEditorProvider>();
-                                  return Stack(
-                                    children: provider.textTracks
-                                        .where((t) => currentTime >= t.startTime && currentTime <= t.endTime)
-                                        .map((track) => DraggableResizableText(
-                                      textTrack: track,
-                                      videoSize: videoSize,
-                                      onUpdate: provider.updateTextTrack,
-                                    ))
-                                        .toList(),
-                                  );
-                                },
-                              )
-
-
-                            ],
-                          ),
+                      child: SizedBox(
+                        width: videoSize.width,
+                        height: videoSize.height,
+                        child: Transform(
+                          alignment: Alignment.center,
+                          transform: Matrix4.identity()
+                            ..rotateZ(rotation * 3.14159 / 180)
+                            ..scale(flipH ? -1.0 : 1.0, flipV ? -1.0 : 1.0),
+                          child: _buildCroppedVideo(controller, cropRect, cropZoom, videoSize),
                         ),
                       ),
                     ),
-                  ),
 
-                // Loading overlay
-                if (provider.isLoadingVideo ||
-                    (provider.isPlaying && !isInitialized))
-                  Container(
-                    color: Colors.black.withOpacity(0.6),
-                    child: const Center(
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 3,
-                      ),
+                    // Text Overlays — Rebuild only when time changes
+                    Selector<VideoEditorProvider, Duration>(
+                      selector: (_, p) => p.currentPosition,
+                      builder: (_, currentTime, __) {
+                        return Stack(
+                          children: provider.textTracks.where((text) {
+                            return currentTime >= text.startTime &&
+                                currentTime < text.startTime + text.duration;
+                          }).map((textTrack) {
+                            return DraggableResizableText(
+                              key: ValueKey(textTrack.id),
+                              textTrack: textTrack,
+                              videoSize: videoSize,
+                              isSelected: provider.selectedTextTrack?.id == textTrack.id,
+                              onUpdate: (updated) {
+                                provider.updateTextTrack(updated);
+                              },
+                            );
+                          }).toList(),
+                        );
+                      },
                     ),
-                  ),
 
-                // Optional: Selection border
-                if (provider.selectedVideoTrackId != null)
-                  IgnorePointer(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.white, width: 2),
-                        borderRadius: BorderRadius.circular(12),
+                    // Loading indicator
+                    if (provider.isLoadingVideo)
+                      Container(
+                        color: Colors.black54,
+                        child: const Center(
+                          child: CircularProgressIndicator(color: Colors.white),
+                        ),
                       ),
-                    ),
-                  ),
-              ],
+
+                    // Selection border (optional visual feedback)
+                    if (provider.selectedVideoTrackId == activeTrack.id)
+                      IgnorePointer(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(color: const Color(0xFFB700FF), width: 3),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ),
           ),
         );
@@ -195,30 +149,33 @@ class VideoPlayerWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildCropOverlay(
-    Rect crop,
-    double zoom,
-    Size videoSize,
-    VideoPlayerController controller,
-  ) {
-    if (crop == const Rect.fromLTWH(0, 0, 1, 1) && zoom == 1.0) {
+  Widget _buildCroppedVideo(
+      VideoPlayerController controller,
+      Rect normalizedCrop,
+      double zoom,
+      Size videoSize,
+      ) {
+    if (normalizedCrop == const Rect.fromLTWH(0, 0, 1, 1) && zoom == 1.0) {
       return VideoPlayer(controller);
     }
 
     final cropPixels = Rect.fromLTWH(
-      crop.left * videoSize.width,
-      crop.top * videoSize.height,
-      crop.width * videoSize.width / zoom,
-      crop.height * videoSize.height / zoom,
+      normalizedCrop.left * videoSize.width,
+      normalizedCrop.top * videoSize.height,
+      normalizedCrop.width * videoSize.width / zoom,
+      normalizedCrop.height * videoSize.height / zoom,
     );
 
-    final offsetX = -cropPixels.left + (videoSize.width - cropPixels.width) / 2;
-    final offsetY =
-        -cropPixels.top + (videoSize.height - cropPixels.height) / 2;
+    final offsetX = (videoSize.width - cropPixels.width) / 2 - cropPixels.left;
+    final offsetY = (videoSize.height - cropPixels.height) / 2 - cropPixels.top;
 
-    return Transform.translate(
-      offset: Offset(offsetX, offsetY),
-      child: VideoPlayer(controller),
+    return OverflowBox(
+      maxWidth: double.infinity,
+      maxHeight: double.infinity,
+      child: Transform.translate(
+        offset: Offset(offsetX, offsetY),
+        child: VideoPlayer(controller),
+      ),
     );
   }
 }

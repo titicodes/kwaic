@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
+import '../model/video_track.dart';
 import '../provider/video_editor_provider.dart';
 import '../timeline_constants.dart';
 import 'audio_timeline_row.dart';
@@ -17,13 +18,15 @@ class TimelineWidget extends StatefulWidget {
 
 class _TimelineWidgetState extends State<TimelineWidget> {
   double _center = 0;
+  late VideoEditorProvider _provider;
 
   @override
   void initState() {
     super.initState();
+    _provider = context.read<VideoEditorProvider>(); // ← Store it here
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final provider = context.read<VideoEditorProvider>();
-      provider.timelineScrollController.addListener(_onScroll);
+      _provider.timelineScrollController.addListener(_onScroll);
     });
   }
 
@@ -32,26 +35,22 @@ class _TimelineWidgetState extends State<TimelineWidget> {
 
 
   void _onScroll() {
-    final provider = context.read<VideoEditorProvider>();
-    final controller = provider.timelineScrollController;
-
-    if (!controller.hasClients || provider.isPlaying) return;
+    final controller = _provider.timelineScrollController;
+    if (!controller.hasClients || _provider.isPlaying) return;
 
     final seconds = controller.offset / pixelsPerSecond;
-    final clampedSeconds = seconds.clamp(0, provider.totalTimelineSeconds);
-
+    final clampedSeconds = seconds.clamp(0.0, _provider.totalTimelineSeconds);
     final newPos = Duration(milliseconds: (clampedSeconds * 1000).round());
 
-    if ((newPos - _lastSeek).abs() >= const Duration(milliseconds: 80)) {
+    if ((newPos - _lastSeek).abs() >= const Duration(milliseconds: 60)) {
       _lastSeek = newPos;
-      provider.seekTo(newPos);
+      _provider.seekTo(newPos); // This updates preview + audio sync
     }
   }
 
   @override
   void dispose() {
-    final provider = context.read<VideoEditorProvider>();
-    provider.timelineScrollController.removeListener(_onScroll);
+    _provider.timelineScrollController.removeListener(_onScroll);
     super.dispose();
   }
 
@@ -209,61 +208,111 @@ class _LeftSection extends StatelessWidget {
 }
 
 // ---------------------- Video Clips Row ----------------------
+
 class VideoClipsRow extends StatelessWidget {
   const VideoClipsRow({super.key});
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<VideoEditorProvider>();
-    Duration? _dragStartTime;
-
 
     return SizedBox(
       height: 60,
-      child: Row(
-        children: provider.videoTracks.map((track) {
-          // Minimum width to avoid invisible clips
-          final double width =
-          math.max(track.duration.inMilliseconds / 1000 * pixelsPerSecond, 40);
+      child: Stack(
+        children: provider.videoTracks.asMap().entries.map((entry) {
+          final int index = entry.key;
+          final VideoTrack track = entry.value;
+
+          // Correct left position using startTime
+          final double left = track.startTime.inMilliseconds / 1000 * pixelsPerSecond;
+          final double width = math.max(
+            track.duration.inMilliseconds / 1000 * pixelsPerSecond,
+            40,
+          );
           final bool isSelected = provider.selectedVideoTrackId == track.id;
 
-          return GestureDetector(
-            onLongPressStart: (_) {
-              _dragStartTime = track.startTime;
-            },
-
-            onLongPressMoveUpdate: (details) {
-              if (_dragStartTime == null) return;
-
-              final deltaSeconds = details.offsetFromOrigin.dx / pixelsPerSecond;
-
-              final newStart = _dragStartTime! +
-                  Duration(milliseconds: (deltaSeconds * 1000).round());
-
-              if (newStart < Duration.zero) return;
-
-              provider.moveClip(track, newStart);
-            },
-
-            onLongPressEnd: (_) {
-              _dragStartTime = null;
-            },
-
-
-            child: Container(
-              width: width,
-              height: 60,
-              margin: const EdgeInsets.only(right: 4),
-              decoration: BoxDecoration(
-                border: isSelected
-                    ? Border.all(color: const Color(0xFFB700FF), width: 3)
-                    : null,
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: isSelected
-                    ? [const BoxShadow(color: Color(0xFFB700FF), blurRadius: 8)]
-                    : null,
+          return Positioned(
+            left: left,
+            top: 0,
+            width: width,
+            child: GestureDetector(
+              onTap: () => provider.selectVideoTrack(track.id),
+              onDoubleTap: () {
+                final pos = provider.currentPosition;
+                if (pos >= track.startTime && pos < track.endTime) {
+                  provider.splitVideoAt(pos);
+                }
+              },
+              child: Stack(
+                children: [
+                  Container(
+                    height: 60,
+                    margin: const EdgeInsets.only(right: 4),
+                    decoration: BoxDecoration(
+                      border: isSelected
+                          ? Border.all(color: const Color(0xFFB700FF), width: 3)
+                          : null,
+                      borderRadius: BorderRadius.circular(8),
+                      boxShadow: isSelected
+                          ? [const BoxShadow(color: Color(0xFFB700FF), blurRadius: 8)]
+                          : null,
+                    ),
+                    child: VideoClipWidget(track: track),
+                  ),
+                  // Full clip drag for move
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onLongPressMoveUpdate: (details) {
+                        final deltaSeconds = details.offsetFromOrigin.dx / pixelsPerSecond;
+                        final newStart = track.startTime + Duration(milliseconds: (deltaSeconds * 1000).round());
+                        if (newStart >= Duration.zero) {
+                          provider.moveClip(track, newStart);
+                        }
+                      },
+                    ),
+                  ),
+                  // Trim handles when selected
+                  if (isSelected)
+                    Positioned.fill(
+                      child: Row(
+                        children: [
+                          GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onHorizontalDragUpdate: (d) {
+                              final newStartSeconds = track.startTime.inMilliseconds / 1000 + d.delta.dx / pixelsPerSecond;
+                              if (newStartSeconds >= 0) {
+                                provider.previewTrimStart(Duration(seconds: newStartSeconds.round()));
+                              }
+                            },
+                            onHorizontalDragEnd: (_) => provider.applyTrim(),
+                            child: Container(
+                              width: 20,
+                              alignment: Alignment.centerLeft,
+                              child: Container(width: 5, height: 40, color: Colors.white),
+                            ),
+                          ),
+                          const Spacer(),
+                          GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onHorizontalDragUpdate: (d) {
+                              final newEndSeconds = track.endTime.inMilliseconds / 1000 + d.delta.dx / pixelsPerSecond;
+                              if (newEndSeconds > track.startTime.inMilliseconds / 1000 + 0.2) {
+                                provider.previewTrimEnd(Duration(seconds: newEndSeconds.round()));
+                              }
+                            },
+                            onHorizontalDragEnd: (_) => provider.applyTrim(),
+                            child: Container(
+                              width: 20,
+                              alignment: Alignment.centerRight,
+                              child: Container(width: 5, height: 40, color: Colors.white),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               ),
-              child: VideoClipWidget(track: track),
             ),
           );
         }).toList(),

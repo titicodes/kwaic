@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -50,6 +51,9 @@ class VideoEditorProvider with ChangeNotifier {
 
   bool _isPlaying = false;
   bool get isPlaying => _isPlaying;
+// In VideoEditorProvider
+  Duration audioTrimStart = Duration.zero;
+  Duration audioTrimEnd = Duration.zero;
 
 
   EditorMode _mode = EditorMode.idle;
@@ -149,18 +153,14 @@ class VideoEditorProvider with ChangeNotifier {
     return clip.startTime + _videoController!.value.position;
   }
 
-
   void togglePlayPause() {
     if (_videoController == null) return;
-
     if (_videoController!.value.isPlaying) {
       _videoController!.pause();
-      _isPlaying = false;
     } else {
       _videoController!.play();
-      _isPlaying = true;
     }
-
+    _isPlaying = _videoController!.value.isPlaying;
     notifyListeners();
   }
 
@@ -169,6 +169,22 @@ class VideoEditorProvider with ChangeNotifier {
     _videoController!.seekTo(time);
   }
 
+  void selectVideoTrack(String? trackId) {
+    selectedVideoTrackId = trackId;
+    selectedAudioTrack = null;
+    if (trackId != null) {
+      selectedTrackIndex = videoTracks.indexWhere((t) => t.id == trackId);
+    }
+    showToolbar(); // ← Force toolbar to appear
+    notifyListeners();
+  }
+
+  void selectAudio(AudioTrack track) {
+    selectedAudioTrack = track;
+    selectedVideoTrackId = null;
+    showToolbar(); // ← Force toolbar to appear
+    notifyListeners();
+  }
 
   void updateActiveClip(Duration globalTime) {
     final index = videoTracks.indexWhere(
@@ -965,41 +981,32 @@ class VideoEditorProvider with ChangeNotifier {
   Future<void> addAudio({
     required File file,
     required Duration start,
-    required Duration duration,
+    String? linkedClipId,
   })
   async {
     try {
       final tmp = await getTemporaryDirectory();
-
       final double startSeconds = start.inMilliseconds / 1000.0;
-      final double durationSeconds = duration.inMilliseconds / 1000.0;
+      final player = AudioPlayer();
+      await player.setFilePath(file.path);
+      final dur = player.duration ?? const Duration(seconds: 10); // Fallback
+      final durationSeconds = dur.inMilliseconds / 1000.0;
+      final fullDuration = player.duration ?? Duration(seconds: 10);
 
       final waveFile = File('${tmp.path}/wave_${DateTime.now().millisecondsSinceEpoch}.wave');
-
       Waveform? waveform;
-
       final stream = JustWaveform.extract(
         audioInFile: file,
         waveOutFile: waveFile,
-        // Optional: adjust zoom for better waveform detail
-        // zoom: const WaveformZoom.pixelsPerSecond(100),
       );
-
       await for (final progress in stream) {
         if (progress.waveform != null) {
           waveform = progress.waveform!;
-          // You can break here if you want the final result only
-          // break;
         }
       }
-
-      // Clean up the temporary .wave file (optional, saves storage)
       if (await waveFile.exists()) {
         await waveFile.delete();
       }
-
-      final player = AudioPlayer();
-      await player.setFilePath(file.path);
 
       final newTrack = AudioTrack(
         id: const Uuid().v4(),
@@ -1008,18 +1015,10 @@ class VideoEditorProvider with ChangeNotifier {
         start: startSeconds,
         waveform: waveform,
         player: player,
+        linkedClipId: linkedClipId,
+        originalDuration: durationSeconds,
       );
-
       audioTracks.add(newTrack);
-
-      if (waveform != null) {
-        debugPrint('✅ Audio added with waveform: ${waveform.length} pixels, '
-            '${waveform.samplesPerPixel} samples/pixel, '
-            'duration: ${waveform.duration.inSeconds}s');
-      } else {
-        debugPrint('⚠️ Audio added WITHOUT waveform (extraction failed)');
-      }
-
       notifyListeners();
     } catch (e, stack) {
       debugPrint('❌ Error adding audio: $e');
@@ -1151,11 +1150,6 @@ class VideoEditorProvider with ChangeNotifier {
 
   AudioTrack? selectedAudioTrack;
 
-  void selectAudio(AudioTrack track) {
-    selectedAudioTrack = track;
-    notifyListeners();
-  }
-
   void clearAudioSelection() {
     selectedAudioTrack = null;
     notifyListeners();
@@ -1220,12 +1214,6 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   String? selectedVideoTrackId;
-
-  void selectVideoTrack(String? trackId) {
-    selectedVideoTrackId = trackId;
-    selectedTrackIndex = videoTracks.indexWhere((t) => t.id == trackId);
-    notifyListeners();
-  }
 
   void clearSelection() {
     selectedVideoTrackId = null;
@@ -1412,28 +1400,17 @@ class VideoEditorProvider with ChangeNotifier {
     if (_isSwitchingClip) return;
 
     final nextIndex = selectedTrackIndex + 1;
-
     if (nextIndex >= videoTracks.length) {
-      // End of timeline
       _isPlaying = false;
       notifyListeners();
       return;
     }
 
     _isSwitchingClip = true;
-
-    try {
-      selectedTrackIndex = nextIndex;
-
-      await switchToClip(
-        videoTracks[nextIndex],
-        seekToGlobal: videoTracks[nextIndex].startTime,
-      );
-    } finally {
-      _isSwitchingClip = false;
-    }
+    selectedTrackIndex = nextIndex;
+    await switchToClip(videoTracks[nextIndex]);
+    _isSwitchingClip = false;
   }
-
   // =================== SWITCH CLIPS ===================
   Future<void> switchToClip(VideoTrack track, {Duration? seekToGlobal}) async {
     if (_videoController != null) {
@@ -1562,6 +1539,13 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   void _syncAudioTracks(Duration timelinePosition) {
+    final currentClip = videoTracks[selectedTrackIndex];
+    if (!currentClip.audioMuted) {
+      // Play video audio normally (via videoController)
+    } else {
+      videoController?.setVolume(0.0); // Or handle separately if needed
+    }
+
     for (final track in audioTracks) {
       final audioStart = Duration(
         milliseconds: (track.start * 1000).round(),
@@ -1602,5 +1586,248 @@ class VideoEditorProvider with ChangeNotifier {
       }
     }
   }
+
+  Future<void> replaceAudioTrack({
+    required AudioTrack oldTrack,
+    required File newFile,
+  })
+  async {
+    try {
+      // 1️⃣ Stop old audio
+      await oldTrack.player.stop();
+
+      // 2️⃣ Extract new waveform
+      final tmp = await getTemporaryDirectory();
+      final waveFile = File(
+        '${tmp.path}/wave_${DateTime.now().millisecondsSinceEpoch}.wave',
+      );
+
+      Waveform? waveform;
+
+      final stream = JustWaveform.extract(
+        audioInFile: newFile,
+        waveOutFile: waveFile,
+      );
+
+      await for (final progress in stream) {
+        if (progress.waveform != null) {
+          waveform = progress.waveform!;
+        }
+      }
+
+      if (await waveFile.exists()) {
+        await waveFile.delete();
+      }
+
+      // 3️⃣ Load new audio into SAME player
+      await oldTrack.player.setFilePath(newFile.path);
+
+      // 4️⃣ Update track fields safely
+      final index = audioTracks.indexWhere((t) => t.id == oldTrack.id);
+      if (index == -1) return;
+
+      audioTracks[index] = oldTrack.copyWith(
+        path: newFile.path,
+        duration: oldTrack.player.duration!.inMilliseconds / 1000.0,
+        waveform: waveform,
+      );
+
+      notifyListeners();
+    } catch (e, st) {
+      debugPrint('❌ replaceAudioTrack error: $e');
+      debugPrint(st.toString());
+    }
+  }
+
+  void splitVideoAt(Duration globalTime) {
+    final index = videoTracks.indexWhere(
+          (t) => globalTime > t.startTime && globalTime < t.endTime,
+    );
+    if (index == -1) return;
+
+    final track = videoTracks[index];
+
+    final splitPoint = globalTime - track.startTime;
+
+    final first = track.copyWith(
+      endTime: globalTime,
+    );
+
+    final second = track.copyWith(
+      id: const Uuid().v4(),
+      startTime: globalTime,
+      endTime: track.endTime,
+      trimStart: track.trimStart + splitPoint,
+    );
+
+    videoTracks
+      ..removeAt(index)
+      ..insert(index, first)
+      ..insert(index + 1, second);
+
+    final linkedAudio = audioTracks.firstWhereOrNull((a) => a.linkedClipId == track.id);
+    if (linkedAudio != null) {
+      splitAudioAt(globalTime);
+    }
+
+    notifyListeners();
+  }
+
+  Future<void> replaceVideoClip(
+      VideoTrack old,
+      File newFile,
+      )
+  async {
+    final controller = VideoPlayerController.file(newFile);
+    await controller.initialize();
+
+    final index = videoTracks.indexWhere((t) => t.id == old.id);
+    if (index == -1) return;
+
+    final newTrack = old.copyWith(
+      path: newFile.path,
+      endTime: old.startTime + controller.value.duration,
+    );
+
+    videoTracks[index] = newTrack;
+
+    await loadVideo(newFile.path);
+
+    notifyListeners();
+  }
+
+  Future<void> extractAudioFromSelectedClip() async {
+    if (videoTracks.isEmpty || selectedTrackIndex < 0) return;
+    final track = videoTracks[selectedTrackIndex];
+    final outputPath = '${track.path}_extracted_audio.mp3';
+    final command = '-i "${track.path}" -vn -c:a aac -b:a 128k "$outputPath"';
+    final session = await FFmpegKit.execute(command);
+    final returnCode = await session.getReturnCode();
+    if (ReturnCode.isSuccess(returnCode)) {
+      final file = File(outputPath);
+      await addAudio(
+        file: file,
+        start: track.startTime,
+        linkedClipId: track.id, // Link to video
+      );
+      // Mute original video audio
+      final mutedTrack = track.copyWith(audioMuted: true);
+      replaceTrack(selectedTrackIndex, mutedTrack);
+    } else {
+      debugPrint('❌ Failed to extract audio');
+    }
+    notifyListeners();
+  }
+
+// In VideoEditorProvider
+  Future<void> splitAudioAt(Duration globalTime) async {
+    final index = audioTracks.indexWhere(
+          (t) => globalTime >= t.startTime && globalTime < t.endTime,
+    );
+    if (index == -1) return;
+
+    final track = audioTracks[index];
+    final splitPointSeconds = (globalTime - track.startTime).inMilliseconds / 1000.0;
+
+    final firstPath = '${track.path}_split1_${DateTime.now().millisecondsSinceEpoch}.mp3';
+    final secondPath = '${track.path}_split2_${DateTime.now().millisecondsSinceEpoch}.mp3';
+
+    final cmd1 = '-i "${track.path}" -t $splitPointSeconds -c copy "$firstPath"';
+    final cmd2 = '-i "${track.path}" -ss $splitPointSeconds -c copy "$secondPath"';
+
+    final session1 = await FFmpegKit.execute(cmd1);
+    final session2 = await FFmpegKit.execute(cmd2);
+
+    final rc1 = await session1.getReturnCode();
+    final rc2 = await session2.getReturnCode();
+
+    if (ReturnCode.isSuccess(rc1) && ReturnCode.isSuccess(rc2)) {
+      final firstDuration = splitPointSeconds;
+      final secondDuration = track.duration - splitPointSeconds;
+
+      final first = track.copyWith(
+        id: const Uuid().v4(),
+        path: firstPath,
+        duration: firstDuration,
+      );
+
+      final second = track.copyWith(
+        id: const Uuid().v4(),
+        path: secondPath,
+        duration: secondDuration,
+        start: track.start + splitPointSeconds,
+      );
+
+      audioTracks
+        ..removeAt(index)
+        ..insert(index, first)
+        ..insert(index + 1, second);
+
+      notifyListeners();
+    }
+  }
+
+  void previewAudioTrimStart(double startSeconds) {
+   audioTrimStart = Duration(milliseconds: (startSeconds * 1000).round());
+    notifyListeners();
+  }
+
+  void previewAudioTrimEnd(double endSeconds) {
+    audioTrimEnd = Duration(milliseconds: (endSeconds * 1000).round());
+    notifyListeners();
+  }
+
+  Future<void> applyAudioTrim(AudioTrack track, Duration newStartTime, Duration newEndTime) async {
+    final newDurationSeconds = (newEndTime - newStartTime).inMilliseconds / 1000.0;
+    final outputPath = '${track.path}_trimmed_${DateTime.now().millisecondsSinceEpoch}.mp3';
+
+    final command = '-i "${track.path}" -ss ${newStartTime.inSeconds}.${newStartTime.inMilliseconds % 1000} '
+        '-to ${newEndTime.inSeconds}.${newEndTime.inMilliseconds % 1000} -c copy "$outputPath"';
+
+    final session = await FFmpegKit.execute(command);
+    final rc = await session.getReturnCode();
+
+    if (ReturnCode.isSuccess(rc)) {
+      final trimmed = track.copyWith(
+        path: outputPath,
+        duration: newDurationSeconds,
+        start: newStartTime.inMilliseconds / 1000.0,
+      );
+
+      final index = audioTracks.indexWhere((t) => t.id == track.id);
+      if (index != -1) {
+        audioTracks[index] = trimmed;
+        await trimmed.player.setFilePath(outputPath);
+        // Re-extract waveform if needed
+      }
+      notifyListeners();
+    }
+  }
+
+  Future<bool> trimAudio({
+    required String inputPath,
+    required String outputPath,
+    required Duration start,
+    required Duration end,
+  })
+  async {
+    final command = '-i "$inputPath" -ss ${start.inSeconds} -to ${end.inSeconds} -c copy "$outputPath"';
+    final session = await FFmpegKit.execute(command);
+    final returnCode = await session.getReturnCode();
+    return ReturnCode.isSuccess(returnCode);
+  }
+
+  // Save project metadata (serialize to JSON)
+  Future<void> saveProject(String path) async {
+    final data = {
+      'videoTracks': videoTracks.map((t) => t.toJson()).toList(), // Add toJson to models
+      'audioTracks': audioTracks.map((t) => t.toJson()).toList(),
+      // Add text, etc.
+    };
+    final json = jsonEncode(data);
+    await File(path).writeAsString(json);
+  }
+
+
 
 }

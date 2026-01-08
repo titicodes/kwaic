@@ -6,8 +6,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:kwaic/omnivideo/model/video_track.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
-import '../../nes_scr/widgets/audio_library_sheet.dart';
 import '../provider/video_editor_provider.dart';
+import '../widgets/audio_sheet.dart';
 import '../widgets/bottom_navbar_widget.dart';
 import '../widgets/edit_context_toolbar.dart';
 import '../widgets/fill_bottom_sheet.dart' as fill;
@@ -274,7 +274,6 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
 
       case 'audio':
         return AudioLibrarySheet(insertPosition: provider.currentPosition);
-
       case 'speed':
         return SpeedBottomSheet(
           // SpeedBottomSheet doesn't need onApply/onClose — it uses its own buttons
@@ -359,9 +358,7 @@ class _PlaybackControls extends StatelessWidget {
               color: Colors.white,
               size: 32,
             ),
-            onPressed: () {
-              provider.togglePlayPause();
-            },
+            onPressed: () => provider.togglePlayPause(),
           ),
           const SizedBox(width: 8),
           // Time display

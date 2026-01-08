@@ -127,7 +127,7 @@ class _AudioLibrarySheetState extends State<AudioLibrarySheet> with SingleTicker
     await provider.addAudio(
       file: file,
       start: widget.insertPosition,
-      duration: duration,
+     // duration: duration,
     );
 
     // Stop preview and close sheet

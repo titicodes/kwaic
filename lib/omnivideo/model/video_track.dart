@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 
@@ -30,12 +31,14 @@ class VideoTrack {
 
   final Duration trimStart;
   final Duration trimEnd;
+  final bool audioMuted;
 
   VideoTrack({
     required this.id,
     required this.path,
     required this.startTime,
     required this.endTime,
+    this.audioMuted = false,
 
     this.thumbnail,
     this.timelineThumbnails = const [],
@@ -56,16 +59,44 @@ class VideoTrack {
     Duration? trimEnd,
   }) : trimEnd = trimEnd ?? endTime - startTime;
 
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'path': path,
+      'startTimeMs': startTime.inMilliseconds,
+      'endTimeMs': endTime.inMilliseconds,
+      'thumbnail': thumbnail != null ? base64Encode(thumbnail!) : null, // If needed, encode bytes
+      'timelineThumbnails': timelineThumbnails.map((t) => base64Encode(t)).toList(),
+      'positionDx': position.dx,
+      'positionDy': position.dy,
+      'scale': scale,
+      'rotation': rotation,
+      'flipHorizontal': flipHorizontal,
+      'flipVertical': flipVertical,
+      'cropRectLeft': cropRect.left,
+      'cropRectTop': cropRect.top,
+      'cropRectWidth': cropRect.width,
+      'cropRectHeight': cropRect.height,
+      'cropZoom': cropZoom,
+      'speed': speed,
+      'speedCurve': speedCurve.map((s) => s.toJson()).toList(),
+      'trimStartMs': trimStart.inMilliseconds,
+      'trimEndMs': trimEnd.inMilliseconds,
+      'audioMuted': audioMuted,
+    };
+  }
+
   /// ✅ CapCut-correct visible duration
   Duration get duration => endTime - startTime;
 
   VideoTrack copyWith({
+    String? id, // ✅ ADD THIS
     String? path,
     Duration? startTime,
     Duration? endTime,
     Uint8List? thumbnail,
     List<Uint8List>? timelineThumbnails,
-
+    bool? audioMuted,
     Offset? position,
     double? scale,
     double? rotation,
@@ -82,11 +113,11 @@ class VideoTrack {
     Duration? trimEnd,
   }) {
     return VideoTrack(
-      id: id,
+      id: id ?? this.id, // ✅ USE IT
       path: path ?? this.path,
       startTime: startTime ?? this.startTime,
       endTime: endTime ?? this.endTime,
-
+      audioMuted: audioMuted ?? this.audioMuted,
       thumbnail: thumbnail ?? this.thumbnail,
       timelineThumbnails:
       timelineThumbnails ?? this.timelineThumbnails,
@@ -107,6 +138,7 @@ class VideoTrack {
       trimEnd: trimEnd ?? this.trimEnd,
     );
   }
+
 }
 
 class SpeedSegment {
@@ -119,5 +151,13 @@ class SpeedSegment {
     required this.end,
     required this.speed,
   });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'startMs': start.inMilliseconds,
+      'endMs': end.inMilliseconds,
+      'speed': speed,
+    };
+  }
 }
 

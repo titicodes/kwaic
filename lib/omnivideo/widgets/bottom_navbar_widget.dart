@@ -45,20 +45,12 @@ class BottomNavBarWidget extends StatelessWidget {
               },
             ),
 
+            // In BottomNavBarWidget.dart → Audio button
             _NavItem(
               Icons.music_note,
               'Audio',
               onTap: () {
-                final provider = context.read<VideoEditorProvider>();
-
-                showModalBottomSheet(
-                  context: context,
-                  isScrollControlled: true,
-                  backgroundColor: Colors.transparent,
-                  builder: (_) => AudioLibrarySheet(
-                    insertPosition: provider.currentPosition,
-                  ),
-                );
+                provider.openTool('audio'); // ← Now uses same system as Speed/Text
               },
             ),
 

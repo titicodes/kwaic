@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:collection/collection.dart';
 import 'package:ffmpeg_kit_min_gpl/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_min_gpl/return_code.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -14,6 +15,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_waveform/just_waveform.dart';
 import 'package:kwaic/nes_scr/model/timeline_item.dart';
 import 'package:kwaic/omnivideo/model/video_track.dart';
+import 'package:kwaic/omnivideo/widgets/voiceover_recorder.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
@@ -21,6 +23,7 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 
 import '../../nes_scr/screen/new.dart';
 import '../../nes_scr/servuices/audio_manager.dart';
+import '../../nes_scr/widgets/sound_fx_sheet.dart';
 import '../model/audio_track.dart';
 import '../model/text_track.dart';
 import '../model/thumbnail_arg.dart';
@@ -28,20 +31,21 @@ import '../service/audio_waveform_service.dart';
 import '../service/thumbnail_cache.dart';
 import '../service/video_editor_service.dart';
 import '../timeline_constants.dart';
+import '../widgets/text_to_audio_sheet.dart';
+import '../widgets/video_extraction_screen.dart';
 
 enum EditorMode {
-  idle,        // Only bottom nav
-  toolBar,     // Context toolbar open
-  toolSheet    // A tool bottom sheet open
+  idle, // Only bottom nav
+  toolBar, // Context toolbar open
+  toolSheet, // A tool bottom sheet open
 }
-
 
 class VideoEditorProvider with ChangeNotifier {
   VideoPlayerController? _videoController;
   List<VideoTrack> _videoTracks = [];
   List<AudioTrack> audioTracks = [];
   int _selectedTrackIndex = 0;
-  Duration _currentPosition = Duration.zero;  // Track current position
+  Duration _currentPosition = Duration.zero; // Track current position
   String _currentTool = '';
   bool _showContextToolbar = false;
   bool _showBottomSheet = false;
@@ -51,10 +55,9 @@ class VideoEditorProvider with ChangeNotifier {
 
   bool _isPlaying = false;
   bool get isPlaying => _isPlaying;
-// In VideoEditorProvider
+  // In VideoEditorProvider
   Duration audioTrimStart = Duration.zero;
   Duration audioTrimEnd = Duration.zero;
-
 
   EditorMode _mode = EditorMode.idle;
   String? _activeTool;
@@ -66,7 +69,7 @@ class VideoEditorProvider with ChangeNotifier {
   VideoPlayerController? get videoController => _videoController;
   List<VideoTrack> get videoTracks => _videoTracks;
   int get selectedTrackIndex => _selectedTrackIndex;
-  Duration get currentPosition => _currentPosition;  // Get current position
+  Duration get currentPosition => _currentPosition; // Get current position
   String get currentTool => _currentTool;
   bool get showContextToolbar => _showContextToolbar;
   bool get showBottomSheet => _showBottomSheet;
@@ -75,10 +78,9 @@ class VideoEditorProvider with ChangeNotifier {
   bool get flipVertical => _flipVertical;
   bool freezeHeavyTasksDuringPlayback = true;
   bool _isSwitchingClip = false;
-  bool isScrubbingTimeline = false;     // Current playing clip
-  VideoPlayerController? _nextClipController;  // Preloaded next clip
+  bool isScrubbingTimeline = false; // Current playing clip
+  VideoPlayerController? _nextClipController; // Preloaded next clip
   bool _userScrollingTimeline = false;
-
 
   final AudioManager audioManager = AudioManager();
   // ================= CAPCUT CAMERA =================
@@ -102,7 +104,6 @@ class VideoEditorProvider with ChangeNotifier {
   final List<TextTrack> textTracks = [];
   TextTrack? selectedText;
 
-
   bool _isDraggingClip = false;
 
   bool get isDraggingClip => _isDraggingClip;
@@ -119,6 +120,52 @@ class VideoEditorProvider with ChangeNotifier {
   void startTrimPreview() {
     _isTrimming = true;
     pause();
+  }
+
+  // Add this static navigator key (you already have it — just confirm)
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+
+  // These flags and methods (you already added most — just confirm)
+  bool _showAudioContextToolbar = false;
+  bool get showAudioContextToolbar => _showAudioContextToolbar;
+
+  void openAudioContextToolbar() {
+    _showContextToolbar = true;
+    _showAudioContextToolbar = true;
+    _showBottomSheet = false;
+    _currentTool = '';
+    notifyListeners();
+  }
+
+  void hideAllToolbars() {
+    _showContextToolbar = false;
+    _showAudioContextToolbar = false;
+    _showBottomSheet = false;
+    _currentTool = '';
+    notifyListeners();
+  }
+
+  void handleAudioToolTap(String action) async {
+    switch (action) {
+      case 'extract':
+        await _showVideoPickerForExtraction();
+        break;
+      case 'sound':
+        openTool('audio');
+        break;
+      case 'soundfx':
+        openTool('soundfx');
+        break;
+      case 'record':
+        openTool('record');
+        break;
+      case 'texttoaudio':
+        openTool('texttoaudio');
+        break;
+    }
+
+    hideAllToolbars(); // Optional: close toolbar after selection
   }
 
   void pause() {
@@ -203,6 +250,7 @@ class VideoEditorProvider with ChangeNotifier {
       notifyListeners();
     }
   }
+
   void togglePlayPause() {
     if (_videoController == null) return;
     if (_videoController!.value.isPlaying) {
@@ -252,7 +300,6 @@ class VideoEditorProvider with ChangeNotifier {
     showToolbar(); // Only now — because user tapped
     notifyListeners();
   }
-
 
   // void updateActiveClip(Duration globalTime) {
   //   final index = videoTracks.indexWhere(
@@ -315,7 +362,6 @@ class VideoEditorProvider with ChangeNotifier {
     }
   }
 
-
   Duration get totalTimelineDuration {
     return Duration(seconds: totalTimelineSeconds.toInt());
   }
@@ -359,7 +405,10 @@ class VideoEditorProvider with ChangeNotifier {
   void panTimeline(double dx) {
     timelineCameraSeconds -= dx / pixelsPerSecond;
     final max = totalTimelineSeconds - 5; // some padding
-    timelineCameraSeconds = timelineCameraSeconds.clamp(0.0, max > 0 ? max : 0.0);
+    timelineCameraSeconds = timelineCameraSeconds.clamp(
+      0.0,
+      max > 0 ? max : 0.0,
+    );
     notifyListeners();
   }
 
@@ -463,10 +512,9 @@ class VideoEditorProvider with ChangeNotifier {
   bool _previewFlipH = false;
   bool _previewFlipV = false;
 
-// Add these public getters
+  // Add these public getters
   Rect get previewCropRect => _previewCropRect;
   double get previewCropZoom => _previewCropZoom;
-
 
   void openToolbar() {
     _mode = EditorMode.toolBar;
@@ -487,7 +535,7 @@ class VideoEditorProvider with ChangeNotifier {
     return Duration(milliseconds: snapped);
   }
 
-// Existing private variables
+  // Existing private variables
   Rect _previewCropRect = const Rect.fromLTWH(0, 0, 1, 1);
   double _previewCropZoom = 1.0;
 
@@ -510,9 +558,11 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-// Total duration of current clip (for bounds)
+  // Total duration of current clip (for bounds)
   double get totalDurationSeconds {
-    return _videoController!.value.duration.inMilliseconds.toDouble() / 1000.0 ?? 10.0;
+    return _videoController!.value.duration.inMilliseconds.toDouble() /
+            1000.0 ??
+        10.0;
   }
 
   void selectClip(int i) async {
@@ -550,7 +600,7 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-// Reset for new session
+  // Reset for new session
   void resetCrop() {
     _cropRect = const Rect.fromLTWH(0, 0, 1, 1);
     _cropZoom = 1.0;
@@ -559,8 +609,7 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-
-// Optional: reset on tool open
+  // Optional: reset on tool open
   void resetPreviewCrop() {
     _previewCropRect = const Rect.fromLTWH(0, 0, 1, 1);
     _previewCropZoom = 1.0;
@@ -580,6 +629,7 @@ class VideoEditorProvider with ChangeNotifier {
     _previewFlipV = false;
     notifyListeners();
   }
+
   // Setters
   set videoController(VideoPlayerController? controller) {
     _videoController?.removeListener(_updatePosition);
@@ -611,7 +661,6 @@ class VideoEditorProvider with ChangeNotifier {
     _showBottomSheet = true;
     notifyListeners();
   }
-
 
   void replaceTrack(int index, VideoTrack newTrack) {
     _videoTracks[index] = newTrack;
@@ -693,7 +742,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-
   void _updateVideoPosition() {
     if (_videoController == null) return;
 
@@ -727,7 +775,6 @@ class VideoEditorProvider with ChangeNotifier {
     _cropZoom = zoom;
     notifyListeners();
   }
-
 
   void startCropPreview() {
     _previewCropRect = _cropRect;
@@ -772,7 +819,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-
   Duration get trimStart => _trimStart;
   Duration get trimEnd => _trimEnd;
 
@@ -801,15 +847,13 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-
   // Trim video using FFmpeg
   Future<bool> trimVideo({
     required String inputPath,
     required String outputPath,
     required Duration start,
     required Duration end,
-  })
-  async {
+  }) async {
     final command =
         '-i "$inputPath" -ss ${start.inSeconds} -to ${end.inSeconds} -c copy "$outputPath"';
     final session = await FFmpegKit.execute(command);
@@ -822,8 +866,7 @@ class VideoEditorProvider with ChangeNotifier {
     required String inputPath,
     required String outputPath,
     required double angle,
-  })
-  async {
+  }) async {
     final command =
         '-i "$inputPath" -vf "rotate=${angle * 3.14159 / 180}:c=black@0" "$outputPath"';
     final session = await FFmpegKit.execute(command);
@@ -836,8 +879,7 @@ class VideoEditorProvider with ChangeNotifier {
     required String inputPath,
     required String outputPath,
     required bool flipHorizontal,
-  })
-  async {
+  }) async {
     final command =
         '-i "$inputPath" -vf "${flipHorizontal ? "hflip" : "vflip"}" "$outputPath"';
     final session = await FFmpegKit.execute(command);
@@ -875,6 +917,7 @@ class VideoEditorProvider with ChangeNotifier {
       await loadVideo(outputPath);
     }
   }
+
   // Apply rotation
   Future<void> applyRotation(double angle) async {
     if (_videoTracks.isEmpty) return;
@@ -913,13 +956,10 @@ class VideoEditorProvider with ChangeNotifier {
     }
   }
 
-
-
   Future<List<Uint8List>> generateClipThumbnails({
     required String videoPath,
     required Duration duration,
   }) async {
-
     if (freezeHeavyTasksDuringPlayback && _isPlaying) {
       return <Uint8List>[];
     }
@@ -929,8 +969,10 @@ class VideoEditorProvider with ChangeNotifier {
     }
 
     final int thumbnailsPerSecond = 3;
-    final int targetCount =
-    (duration.inSeconds * thumbnailsPerSecond).clamp(12, 80);
+    final int targetCount = (duration.inSeconds * thumbnailsPerSecond).clamp(
+      12,
+      80,
+    );
 
     final double intervalSeconds = duration.inSeconds / targetCount;
     final List<Uint8List> thumbs = [];
@@ -972,7 +1014,8 @@ class VideoEditorProvider with ChangeNotifier {
     if (_videoTracks.isEmpty || _videoController == null) return;
 
     final track = _videoTracks[_selectedTrackIndex];
-    final outputPath = '${track.path}_cropped_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final outputPath =
+        '${track.path}_cropped_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
     // 1. Get actual video dimensions
     final double vWidth = _videoController!.value.size.width;
@@ -1011,7 +1054,8 @@ class VideoEditorProvider with ChangeNotifier {
     // 5. Execute FFmpeg command
     // -vf "crop=w:h:x:y"
     // -c:a copy: keeps the original audio without re-encoding (faster)
-    final command = '-i "${track.path}" -vf "crop=$finalW:$finalH:$finalX:$finalY" -c:a copy "$outputPath"';
+    final command =
+        '-i "${track.path}" -vf "crop=$finalW:$finalH:$finalX:$finalY" -c:a copy "$outputPath"';
 
     final session = await FFmpegKit.execute(command);
     final returnCode = await session.getReturnCode();
@@ -1043,19 +1087,16 @@ class VideoEditorProvider with ChangeNotifier {
         duration: track.duration,
       );
 
-      final index =
-      videoTracks.indexWhere((t) => t.id == track.id);
+      final index = videoTracks.indexWhere((t) => t.id == track.id);
 
       if (index != -1) {
-        _videoTracks[index] =
-            _videoTracks[index].copyWith(
-              timelineThumbnails: thumbs,
-            );
+        _videoTracks[index] = _videoTracks[index].copyWith(
+          timelineThumbnails: thumbs,
+        );
         notifyListeners();
       }
     }
   }
-
 
   void setCurrentTime(Duration time) {
     if (_videoController == null) return;
@@ -1075,8 +1116,7 @@ class VideoEditorProvider with ChangeNotifier {
     required File file,
     required Duration start,
     String? linkedClipId,
-  })
-  async {
+  }) async {
     try {
       final tmp = await getTemporaryDirectory();
       final double startSeconds = start.inMilliseconds / 1000.0;
@@ -1086,7 +1126,9 @@ class VideoEditorProvider with ChangeNotifier {
       final durationSeconds = dur.inMilliseconds / 1000.0;
       final fullDuration = player.duration ?? Duration(seconds: 10);
 
-      final waveFile = File('${tmp.path}/wave_${DateTime.now().millisecondsSinceEpoch}.wave');
+      final waveFile = File(
+        '${tmp.path}/wave_${DateTime.now().millisecondsSinceEpoch}.wave',
+      );
       Waveform? waveform;
       final stream = JustWaveform.extract(
         audioInFile: file,
@@ -1176,9 +1218,7 @@ class VideoEditorProvider with ChangeNotifier {
 
     final curve = generateSpeedCurve(track);
 
-    videoTracks[selectedTrackIndex] = track.copyWith(
-      speedCurve: curve,
-    );
+    videoTracks[selectedTrackIndex] = track.copyWith(speedCurve: curve);
 
     notifyListeners();
   }
@@ -1193,7 +1233,9 @@ class VideoEditorProvider with ChangeNotifier {
       final original = segment.end - segment.start;
       // Clamp speed to avoid division by zero
       final safeSpeed = segment.speed.clamp(0.1, 100.0);
-      total += Duration(milliseconds: (original.inMilliseconds / safeSpeed).round());
+      total += Duration(
+        milliseconds: (original.inMilliseconds / safeSpeed).round(),
+      );
     }
     return total;
   }
@@ -1248,10 +1290,10 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-
   double timeToX(Duration t, double screenWidth) {
     return ((t.inMilliseconds / 1000) - timelineCameraSeconds) *
-        pixelsPerSecond + screenWidth / 2;
+            pixelsPerSecond +
+        screenWidth / 2;
   }
 
   Duration xToTime(double x, double screenWidth) {
@@ -1259,7 +1301,6 @@ class VideoEditorProvider with ChangeNotifier {
         ((x - screenWidth / 2) / pixelsPerSecond) + timelineCameraSeconds;
     return Duration(milliseconds: (seconds * 1000).round());
   }
-
 
   double get timelineWorldWidth {
     if (videoTracks.isEmpty && audioTracks.isEmpty) return 2000;
@@ -1280,8 +1321,9 @@ class VideoEditorProvider with ChangeNotifier {
     if (_clipThumbnailCache.containsKey(track.id)) {
       final index = videoTracks.indexWhere((t) => t.id == track.id);
       if (index != -1) {
-        videoTracks[index] =
-            videoTracks[index].copyWith(timelineThumbnails: _clipThumbnailCache[track.id]!);
+        videoTracks[index] = videoTracks[index].copyWith(
+          timelineThumbnails: _clipThumbnailCache[track.id]!,
+        );
         notifyListeners();
       }
       return;
@@ -1296,7 +1338,9 @@ class VideoEditorProvider with ChangeNotifier {
 
     final index = videoTracks.indexWhere((t) => t.id == track.id);
     if (index != -1) {
-      videoTracks[index] = videoTracks[index].copyWith(timelineThumbnails: thumbs);
+      videoTracks[index] = videoTracks[index].copyWith(
+        timelineThumbnails: thumbs,
+      );
       notifyListeners();
     }
   }
@@ -1325,7 +1369,8 @@ class VideoEditorProvider with ChangeNotifier {
     if (videoTracks.isEmpty) return null;
 
     final tempDir = await getTemporaryDirectory();
-    final outputPath = '${tempDir.path}/export_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final outputPath =
+        '${tempDir.path}/export_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
     // Build complex FFmpeg command
     final inputs = <String>[];
@@ -1340,7 +1385,8 @@ class VideoEditorProvider with ChangeNotifier {
 
       // Trim
       if (track.trimStart > Duration.zero || track.trimEnd < track.duration) {
-        filter += 'trim=start=${track.trimStart.inMilliseconds / 1000}:end=${track.trimEnd.inMilliseconds / 1000},setpts=PTS-STARTPTS';
+        filter +=
+            'trim=start=${track.trimStart.inMilliseconds / 1000}:end=${track.trimEnd.inMilliseconds / 1000},setpts=PTS-STARTPTS';
       }
 
       // Speed (simple uniform speed)
@@ -1349,7 +1395,8 @@ class VideoEditorProvider with ChangeNotifier {
       }
 
       // Crop + Zoom
-      if (track.cropRect != const Rect.fromLTWH(0, 0, 1, 1) || track.cropZoom != 1.0) {
+      if (track.cropRect != const Rect.fromLTWH(0, 0, 1, 1) ||
+          track.cropZoom != 1.0) {
         final w = 'iw/${track.cropZoom}';
         final h = 'ih/${track.cropZoom}';
         final x = 'iw*${track.cropRect.left}';
@@ -1361,7 +1408,8 @@ class VideoEditorProvider with ChangeNotifier {
       String transform = '';
       if (track.flipHorizontal) transform += 'hflip,';
       if (track.flipVertical) transform += 'vflip,';
-      if (track.rotation != 0) transform += 'rotate=${track.rotation * math.pi / 180},';
+      if (track.rotation != 0)
+        transform += 'rotate=${track.rotation * math.pi / 180},';
       if (transform.isNotEmpty) {
         filter += ',${transform.substring(0, transform.length - 1)}';
       }
@@ -1371,21 +1419,25 @@ class VideoEditorProvider with ChangeNotifier {
 
     // Concatenate video
     final videoConcat = filters.map((f) => '[$f]').join();
-    final videoFilter = '$videoConcat concat=n=${videoTracks.length}:v=1:a=0 [vout]';
+    final videoFilter =
+        '$videoConcat concat=n=${videoTracks.length}:v=1:a=0 [vout]';
 
-// Audio inputs and mixing
+    // Audio inputs and mixing
     String audioFilter = '';
     if (audioTracks.isNotEmpty) {
       for (int i = 0; i < audioTracks.length; i++) {
         inputs.add('-i "${audioTracks[i].path}"');
       }
 
-      final audioIndices = List.generate(audioTracks.length, (i) => videoTracks.length + i);
+      final audioIndices = List.generate(
+        audioTracks.length,
+        (i) => videoTracks.length + i,
+      );
       final audioMix = audioIndices.map((i) => '[$i:a]').join();
       audioFilter = '$audioMix amix=inputs=${audioTracks.length}[aout]';
     }
 
-// Final command
+    // Final command
     final command = [
       ...inputs,
       '-filter_complex',
@@ -1396,7 +1448,6 @@ class VideoEditorProvider with ChangeNotifier {
       '-c:a aac -b:a 128k',
       outputPath,
     ].join(' ');
-
 
     final session = await FFmpegKit.execute(command);
     final returnCode = await session.getReturnCode();
@@ -1448,22 +1499,17 @@ class VideoEditorProvider with ChangeNotifier {
             timelineScrollController.position.viewportDimension / 2;
 
         final offset =
-            (_currentPosition.inMilliseconds / 1000.0) *
-                pixelsPerSecond -
-                viewportCenter;
+            (_currentPosition.inMilliseconds / 1000.0) * pixelsPerSecond -
+            viewportCenter;
 
         timelineScrollController.jumpTo(
-          offset.clamp(
-            0.0,
-            timelineScrollController.position.maxScrollExtent,
-          ),
+          offset.clamp(0.0, timelineScrollController.position.maxScrollExtent),
         );
       }
 
       notifyListeners();
     });
   }
-
 
   Future<void> _switchToClip(VideoTrack track) async {
     final oldController = _videoController;
@@ -1487,7 +1533,9 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   /// Add multiple videos sequentially to the timeline
-  Future<void> addMultipleVideosSequentially(List<Map<String, dynamic>> videosWithThumbs) async {
+  Future<void> addMultipleVideosSequentially(
+    List<Map<String, dynamic>> videosWithThumbs,
+  ) async {
     _videoTracks.clear();
     _selectedTrackIndex = 0;
 
@@ -1529,7 +1577,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-
   void clampTrimToClip(VideoTrack track) {
     if (_trimStart < Duration.zero) {
       _trimStart = Duration.zero;
@@ -1551,15 +1598,12 @@ class VideoEditorProvider with ChangeNotifier {
     }
 
     for (final track in audioTracks) {
-      final audioStart = Duration(
-        milliseconds: (track.start * 1000).round(),
-      );
-      final audioEnd = audioStart +
-          Duration(milliseconds: (track.duration * 1000).round());
+      final audioStart = Duration(milliseconds: (track.start * 1000).round());
+      final audioEnd =
+          audioStart + Duration(milliseconds: (track.duration * 1000).round());
 
       final isInside =
-          timelinePosition >= audioStart &&
-              timelinePosition < audioEnd;
+          timelinePosition >= audioStart && timelinePosition < audioEnd;
 
       if (!isInside) {
         // 🔇 Ensure silence outside range
@@ -1574,8 +1618,7 @@ class VideoEditorProvider with ChangeNotifier {
 
       // 🔄 Seek if drifted (important)
       final current = track.player.position;
-      if ((current - localAudioPos).abs() >
-          const Duration(milliseconds: 40)) {
+      if ((current - localAudioPos).abs() > const Duration(milliseconds: 40)) {
         track.player.seek(localAudioPos);
       }
 
@@ -1594,8 +1637,7 @@ class VideoEditorProvider with ChangeNotifier {
   Future<void> replaceAudioTrack({
     required AudioTrack oldTrack,
     required File newFile,
-  })
-  async {
+  }) async {
     try {
       // 1️⃣ Stop old audio
       await oldTrack.player.stop();
@@ -1645,7 +1687,7 @@ class VideoEditorProvider with ChangeNotifier {
 
   void splitVideoAt(Duration globalTime) {
     final index = videoTracks.indexWhere(
-          (t) => globalTime > t.startTime && globalTime < t.endTime,
+      (t) => globalTime > t.startTime && globalTime < t.endTime,
     );
     if (index == -1) return;
 
@@ -1653,9 +1695,7 @@ class VideoEditorProvider with ChangeNotifier {
 
     final splitPoint = globalTime - track.startTime;
 
-    final first = track.copyWith(
-      endTime: globalTime,
-    );
+    final first = track.copyWith(endTime: globalTime);
 
     final second = track.copyWith(
       id: const Uuid().v4(),
@@ -1669,7 +1709,9 @@ class VideoEditorProvider with ChangeNotifier {
       ..insert(index, first)
       ..insert(index + 1, second);
 
-    final linkedAudio = audioTracks.firstWhereOrNull((a) => a.linkedClipId == track.id);
+    final linkedAudio = audioTracks.firstWhereOrNull(
+      (a) => a.linkedClipId == track.id,
+    );
     if (linkedAudio != null) {
       splitAudioAt(globalTime);
     }
@@ -1677,11 +1719,7 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> replaceVideoClip(
-      VideoTrack old,
-      File newFile,
-      )
-  async {
+  Future<void> replaceVideoClip(VideoTrack old, File newFile) async {
     final controller = VideoPlayerController.file(newFile);
     await controller.initialize();
 
@@ -1723,21 +1761,26 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-// In VideoEditorProvider
+  // In VideoEditorProvider
   Future<void> splitAudioAt(Duration globalTime) async {
     final index = audioTracks.indexWhere(
-          (t) => globalTime >= t.startTime && globalTime < t.endTime,
+      (t) => globalTime >= t.startTime && globalTime < t.endTime,
     );
     if (index == -1) return;
 
     final track = audioTracks[index];
-    final splitPointSeconds = (globalTime - track.startTime).inMilliseconds / 1000.0;
+    final splitPointSeconds =
+        (globalTime - track.startTime).inMilliseconds / 1000.0;
 
-    final firstPath = '${track.path}_split1_${DateTime.now().millisecondsSinceEpoch}.mp3';
-    final secondPath = '${track.path}_split2_${DateTime.now().millisecondsSinceEpoch}.mp3';
+    final firstPath =
+        '${track.path}_split1_${DateTime.now().millisecondsSinceEpoch}.mp3';
+    final secondPath =
+        '${track.path}_split2_${DateTime.now().millisecondsSinceEpoch}.mp3';
 
-    final cmd1 = '-i "${track.path}" -t $splitPointSeconds -c copy "$firstPath"';
-    final cmd2 = '-i "${track.path}" -ss $splitPointSeconds -c copy "$secondPath"';
+    final cmd1 =
+        '-i "${track.path}" -t $splitPointSeconds -c copy "$firstPath"';
+    final cmd2 =
+        '-i "${track.path}" -ss $splitPointSeconds -c copy "$secondPath"';
 
     final session1 = await FFmpegKit.execute(cmd1);
     final session2 = await FFmpegKit.execute(cmd2);
@@ -1772,7 +1815,7 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   void previewAudioTrimStart(double startSeconds) {
-   audioTrimStart = Duration(milliseconds: (startSeconds * 1000).round());
+    audioTrimStart = Duration(milliseconds: (startSeconds * 1000).round());
     notifyListeners();
   }
 
@@ -1781,11 +1824,18 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> applyAudioTrim(AudioTrack track, Duration newStartTime, Duration newEndTime) async {
-    final newDurationSeconds = (newEndTime - newStartTime).inMilliseconds / 1000.0;
-    final outputPath = '${track.path}_trimmed_${DateTime.now().millisecondsSinceEpoch}.mp3';
+  Future<void> applyAudioTrim(
+    AudioTrack track,
+    Duration newStartTime,
+    Duration newEndTime,
+  ) async {
+    final newDurationSeconds =
+        (newEndTime - newStartTime).inMilliseconds / 1000.0;
+    final outputPath =
+        '${track.path}_trimmed_${DateTime.now().millisecondsSinceEpoch}.mp3';
 
-    final command = '-i "${track.path}" -ss ${newStartTime.inSeconds}.${newStartTime.inMilliseconds % 1000} '
+    final command =
+        '-i "${track.path}" -ss ${newStartTime.inSeconds}.${newStartTime.inMilliseconds % 1000} '
         '-to ${newEndTime.inSeconds}.${newEndTime.inMilliseconds % 1000} -c copy "$outputPath"';
 
     final session = await FFmpegKit.execute(command);
@@ -1813,9 +1863,9 @@ class VideoEditorProvider with ChangeNotifier {
     required String outputPath,
     required Duration start,
     required Duration end,
-  })
-  async {
-    final command = '-i "$inputPath" -ss ${start.inSeconds} -to ${end.inSeconds} -c copy "$outputPath"';
+  }) async {
+    final command =
+        '-i "$inputPath" -ss ${start.inSeconds} -to ${end.inSeconds} -c copy "$outputPath"';
     final session = await FFmpegKit.execute(command);
     final returnCode = await session.getReturnCode();
     return ReturnCode.isSuccess(returnCode);
@@ -1824,12 +1874,102 @@ class VideoEditorProvider with ChangeNotifier {
   // Save project metadata (serialize to JSON)
   Future<void> saveProject(String path) async {
     final data = {
-      'videoTracks': videoTracks.map((t) => t.toJson()).toList(), // Add toJson to models
+      'videoTracks':
+          videoTracks.map((t) => t.toJson()).toList(), // Add toJson to models
       'audioTracks': audioTracks.map((t) => t.toJson()).toList(),
       // Add text, etc.
     };
     final json = jsonEncode(data);
     await File(path).writeAsString(json);
+  }
+
+  Future<void> _showVideoPickerForExtraction() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: true,
+    );
+
+    if (result == null || result.files.isEmpty) {
+      hideAllToolbars();
+      return;
+    }
+
+    final videoPaths = result.files
+        .where((f) => f.path != null)
+        .map((f) => f.path!)
+        .toList();
+
+    // Use a local context from the current widget tree
+    final context = navigatorKey.currentContext;
+    if (context == null || !context.mounted) return;
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => VideoExtractionScreen(
+          selectedVideos: videoPaths,
+          onExtract: () async {
+            await _performAudioExtraction(videoPaths);
+            if (context.mounted) {
+              Navigator.of(context).pop();
+            }
+          },
+        ),
+        fullscreenDialog: true,
+      ),
+    );
+
+    hideAllToolbars();
+  }
+
+  Future<void> _performAudioExtraction(List<String> videoPaths) async {
+    final tempDir = await getTemporaryDirectory();
+    Duration insertPosition = currentPosition;
+
+    for (final videoPath in videoPaths) {
+      final outputPath = '${tempDir.path}/extracted_${DateTime.now().millisecondsSinceEpoch}.m4a';
+
+      final command = '-i "$videoPath" -vn -acodec aac -b:a 192k "$outputPath"';
+      final session = await FFmpegKit.execute(command);
+      final rc = await session.getReturnCode();
+
+      if (!ReturnCode.isSuccess(rc)) continue;
+
+      final audioFile = File(outputPath);
+      final player = AudioPlayer();
+      await player.setFilePath(outputPath);
+      final duration = player.duration ?? const Duration(seconds: 10);
+      await player.dispose();
+
+      Waveform? waveform;
+      final waveFile = File('${tempDir.path}/wave_temp_${DateTime.now().millisecondsSinceEpoch}.wave');
+      try {
+        final stream = JustWaveform.extract(audioInFile: audioFile, waveOutFile: waveFile);
+        await for (final p in stream) {
+          if (p.waveform != null) {
+            waveform = p.waveform;
+            break;
+          }
+        }
+      } catch (_) {}
+      if (await waveFile.exists()) await waveFile.delete();
+
+      final newPlayer = AudioPlayer()..setFilePath(outputPath);
+
+      final audioTrack = AudioTrack(
+        id: const Uuid().v4(),
+        path: outputPath,
+        duration: duration.inMilliseconds / 1000.0,
+        start: insertPosition.inMilliseconds / 1000.0,
+        waveform: waveform,
+        player: newPlayer,
+        originalDuration: duration.inMilliseconds / 1000.0,
+      );
+
+      addAudioTrack(audioTrack);
+      insertPosition += duration;
+    }
+
+    notifyListeners();
   }
 
 

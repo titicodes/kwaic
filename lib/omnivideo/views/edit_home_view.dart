@@ -6,18 +6,23 @@ import 'package:image_picker/image_picker.dart';
 import 'package:kwaic/omnivideo/model/video_track.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
+
+import '../../nes_scr/widgets/sound_fx_sheet.dart';
 import '../provider/video_editor_provider.dart';
+import '../widgets/audio_context_toolbar.dart';
 import '../widgets/audio_sheet.dart';
 import '../widgets/bottom_navbar_widget.dart';
-import '../widgets/edit_context_toolbar.dart';
+import '../widgets/context_toolbar_widget.dart'; // EditContextToolbar
 import '../widgets/fill_bottom_sheet.dart' as fill;
 import '../widgets/flip_bottom_sheet.dart' as flip;
 import '../widgets/rotate_bottom_sheet.dart' as rotate;
 import '../widgets/speed_bottom_sheet.dart';
 import '../widgets/text_bottom_sheet.dart';
+import '../widgets/text_to_audio_sheet.dart';
 import '../widgets/timeline_widget.dart';
 import '../widgets/trim_bottom_sheet.dart';
 import '../widgets/video_player_widget.dart';
+import '../widgets/voiceover_recorder.dart'; // VoiceoverRecorder
 
 class VideoEditorScreens extends StatefulWidget {
   final List<Map<String, dynamic>> videosWithThumbs;
@@ -36,8 +41,6 @@ class VideoEditorScreens extends StatefulWidget {
 }
 
 class _VideoEditorScreensState extends State<VideoEditorScreens> {
-
-
   @override
   void initState() {
     super.initState();
@@ -48,11 +51,9 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
 
   Future<void> _initializeVideos() async {
     final provider = context.read<VideoEditorProvider>();
-
     provider.videoTracks = [];
 
     Duration currentStart = Duration.zero;
-
     for (int i = 0; i < widget.videosWithThumbs.length; i++) {
       final videoData = widget.videosWithThumbs[i];
       final XFile xfile = videoData['file'];
@@ -83,16 +84,10 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
 
     if (provider.videoTracks.isNotEmpty) {
       final firstTrack = provider.videoTracks.first;
-
-      // Use the clean switch method
       await provider.switchToClip(firstTrack);
-
       provider.selectedTrackIndex = 0;
-      provider.selectVideoTrack(firstTrack.id);
-
       provider.generateThumbnailsForAllClips();
 
-      // Start at beginning
       WidgetsBinding.instance.addPostFrameCallback((_) {
         provider.timelineScrollController.jumpTo(0.0);
         provider.seekTo(Duration.zero);
@@ -102,7 +97,6 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
 
   @override
   void dispose() {
-    //_timelineScrollController.dispose();
     super.dispose();
   }
 
@@ -110,13 +104,12 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
   Widget build(BuildContext context) {
     return Consumer<VideoEditorProvider>(
       builder: (context, provider, child) {
-
         return Scaffold(
           backgroundColor: Colors.black,
           body: SafeArea(
             child: Stack(
               children: [
-                // Main content column
+                // Main content — now takes full height
                 Column(
                   children: [
                     _TopBar(projectName: widget.projectName),
@@ -128,36 +121,38 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
                     ),
                     _PlaybackControls(provider: provider),
                     const SizedBox(height: 4),
-                    TimelineWidget(),
-                    const SizedBox(height: 80), // Space for bottom navbar
+                    const TimelineWidget(),
+                    // REMOVE THE FIXED SizedBox(height: 160)
+                    // No extra space needed — Stack handles overlays
                   ],
                 ),
-                // Bottom navbar (always visible)
+
+                // Bottom Nav Bar — always at bottom
                 const Positioned(
                   bottom: 0,
                   left: 0,
                   right: 0,
                   child: BottomNavBarWidget(),
                 ),
-                // Trim bottom sheet (replaces context toolbar when needed)
 
-                // Replace the conditional positioned widgets with:
+                // Bottom Sheets (Speed, Audio, Text, etc.)
                 if (provider.showBottomSheet)
                   Positioned(
-                    bottom: 80,
+                    bottom: provider.showContextToolbar ? 80 : 72, // Above toolbar or nav
                     left: 0,
                     right: 0,
-                    child: _buildActiveBottomSheet(
-                      provider.currentTool,
-                      provider,
-                    ),
-                  )
-                else if (provider.showContextToolbar)
+                    child: _buildActiveBottomSheet(provider.currentTool, provider),
+                  ),
+
+                // Context Toolbars — only when visible
+                if (provider.showContextToolbar)
                   Positioned(
-                    bottom: 80,
+                    bottom: 72, // Always just above BottomNavBar
                     left: 0,
                     right: 0,
-                    child: const EditContextToolbar(),
+                    child: provider.showAudioContextToolbar
+                        ? const AudioContextToolbar()
+                        : const EditContextToolbar(),
                   ),
               ],
             ),
@@ -168,10 +163,9 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
   }
 
   Widget _buildActiveBottomSheet(String tool, VideoEditorProvider provider) {
-    // Safety: For video editing tools, require a selected video clip
+    // Video tools require selection
     if (['trim', 'rotate', 'flip', 'fill', 'speed'].contains(tool)) {
       if (provider.selectedVideoTrackId == null) {
-        // Auto-close if no clip selected
         WidgetsBinding.instance.addPostFrameCallback((_) {
           provider
             ..showBottomSheet = false
@@ -205,7 +199,6 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
             );
             provider.replaceTrack(provider.selectedTrackIndex, updated);
             provider.rotation = 0.0;
-
             provider
               ..showBottomSheet = false
               ..showContextToolbar = true;
@@ -213,7 +206,7 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
           onRotate: (angle) {
             provider.rotation += angle;
           },
-          onFlip: () {}, // not used in rotate sheet
+          onFlip: () {},
         );
 
       case 'flip':
@@ -234,7 +227,6 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
             provider.replaceTrack(provider.selectedTrackIndex, updated);
             provider.flipHorizontal = false;
             provider.flipVertical = false;
-
             provider
               ..showBottomSheet = false
               ..showContextToolbar = true;
@@ -263,7 +255,6 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
               cropZoom: provider.previewCropZoom,
             );
             provider.replaceTrack(provider.selectedTrackIndex, updated);
-
             provider
               ..showBottomSheet = false
               ..showContextToolbar = true;
@@ -272,13 +263,21 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
 
       case 'audio':
         return AudioLibrarySheet(insertPosition: provider.currentPosition);
+
       case 'speed':
-        return SpeedBottomSheet(
-          // SpeedBottomSheet doesn't need onApply/onClose — it uses its own buttons
-        );
+        return const SpeedBottomSheet();
 
       case 'text':
         return const TextBottomSheet();
+
+      case 'soundfx':
+        return const SoundFXSheet();
+
+      case 'record':
+        return const VoiceoverRecorder();
+
+      case 'texttoaudio':
+        return TextToAudioSheet(insertPosition: provider.currentPosition);
 
       default:
         return const SizedBox.shrink();
@@ -349,7 +348,6 @@ class _PlaybackControls extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Row(
         children: [
-          // Play/Pause button
           IconButton(
             icon: Icon(
               provider.isPlaying ? Icons.pause : Icons.play_arrow,
@@ -359,22 +357,17 @@ class _PlaybackControls extends StatelessWidget {
             onPressed: () => provider.togglePlayPause(),
           ),
           const SizedBox(width: 8),
-          // Time display
           StreamBuilder(
-            stream: Stream.periodic(
-              const Duration(milliseconds: 500),
-              (i) => i,
-            ),
+            stream: Stream.periodic(const Duration(milliseconds: 500), (i) => i),
             builder: (context, snapshot) {
               return Text(
                 '${_formatDuration(provider.currentPosition)} | '
-                '${_formatDuration(provider.videoController?.value.duration ?? Duration.zero)}',
+                    '${_formatDuration(provider.videoController?.value.duration ?? Duration.zero)}',
                 style: const TextStyle(color: Colors.white70, fontSize: 12),
               );
             },
           ),
           const Spacer(),
-          // Undo/Redo buttons
           const Icon(Icons.undo, color: Colors.white70, size: 18),
           const SizedBox(width: 12),
           const Icon(Icons.redo, color: Colors.white70, size: 18),

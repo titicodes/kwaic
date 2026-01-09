@@ -18,7 +18,7 @@ class EditContextToolbar extends StatelessWidget {
     final bool isAudio = provider.selectedAudioTrack != null;
 
     return Container(
-      height: 80,
+      height: 50,
       color: Colors.black.withOpacity(0.95),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,

@@ -1,11 +1,9 @@
 // bottom_navbar_widget.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-
 import '../../nes_scr/widgets/audio_library_sheet.dart';
 import '../provider/video_editor_provider.dart';
 
-// bottom_navbar_widget.dart
 class BottomNavBarWidget extends StatelessWidget {
   const BottomNavBarWidget({super.key});
 
@@ -16,50 +14,75 @@ class BottomNavBarWidget extends StatelessWidget {
     return Container(
       height: 72,
       color: Colors.black,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            // Back button when toolbar open, Edit when closed
-            if (provider.showContextToolbar)
-              _NavItem(
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly, // Ensures even spacing
+        children: [
+          // Back / Edit button
+          if (provider.showContextToolbar)
+            Expanded(
+              child: _NavItem(
                 Icons.arrow_back,
                 'Back',
-                onTap: () => provider.hideToolbar(),
+                onTap: () => provider.hideAllToolbars(),
                 active: true,
-              )
-            else
-              _NavItem(
+              ),
+            )
+          else
+            Expanded(
+              child: _NavItem(
                 Icons.content_cut,
                 'Edit',
                 onTap: () => provider.showToolbar(),
                 active: false,
               ),
-
-            _NavItem(
-              Icons.speed,
-              'Speed',
-              onTap: () {
-                provider.openTool('speed');
-              },
             ),
 
-            // In BottomNavBarWidget.dart → Audio button
-            _NavItem(
+          // Speed
+          Expanded(
+            child: _NavItem(
+              Icons.speed,
+              'Speed',
+              onTap: () => provider.openTool('speed'),
+              active: provider.currentTool == 'speed',
+            ),
+          ),
+
+          // Audio
+          Expanded(
+            child: _NavItem(
               Icons.music_note,
               'Audio',
               onTap: () {
-                provider.openTool('audio'); // ← Now uses same system as Speed/Text
+                if (provider.selectedVideoTrackId == null && provider.selectedAudioTrack == null) {
+                  provider.openAudioContextToolbar();
+                } else {
+                  provider.openTool('audio');
+                }
               },
+              active: provider.currentTool == 'audio' || provider.showAudioContextToolbar,
             ),
+          ),
 
-            _NavItem(Icons.text_fields, 'Text', onTap: () => provider.openTool('text')),
-            _NavItem(Icons.auto_awesome, 'Effect', onTap: () => provider.openTool('effect')),
+          // Text
+          Expanded(
+            child: _NavItem(
+              Icons.text_fields,
+              'Text',
+              onTap: () => provider.openTool('text'),
+              active: provider.currentTool == 'text',
+            ),
+          ),
 
-
-          ],
-        ),
+          // Effect
+          Expanded(
+            child: _NavItem(
+              Icons.auto_awesome,
+              'Effect',
+              onTap: () => provider.openTool('effect'),
+              active: provider.currentTool == 'effect',
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -71,7 +94,12 @@ class _NavItem extends StatelessWidget {
   final bool active;
   final VoidCallback? onTap;
 
-  const _NavItem(this.icon, this.label, {this.active = false, this.onTap});
+  const _NavItem(
+      this.icon,
+      this.label, {
+        this.active = false,
+        this.onTap,
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -79,16 +107,17 @@ class _NavItem extends StatelessWidget {
 
     return GestureDetector(
       onTap: onTap,
-      child: SizedBox(
-        width: 60,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: color, size: 24),
-            const SizedBox(height: 4),
-            Text(label, style: TextStyle(color: color, fontSize: 10)),
-          ],
-        ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: color, size: 24),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(color: color, fontSize: 10),
+            textAlign: TextAlign.center,
+          ),
+        ],
       ),
     );
   }

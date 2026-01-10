@@ -1,4 +1,5 @@
 // bottom_navbar_widget.dart
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../nes_scr/widgets/audio_library_sheet.dart';
@@ -10,77 +11,84 @@ class BottomNavBarWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = Provider.of<VideoEditorProvider>(context);
+    final bool isToolbarOpen = provider.showContextToolbar;
 
     return Container(
       height: 72,
       color: Colors.black,
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly, // Ensures even spacing
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          // Back / Edit button
-          if (provider.showContextToolbar)
-            Expanded(
-              child: _NavItem(
-                Icons.arrow_back,
-                'Back',
-                onTap: () => provider.hideAllToolbars(),
-                active: true,
-              ),
+          if (isToolbarOpen)
+            _NavItem(
+              Icons.arrow_back,
+              'Back',
+              onTap: () => provider.hideToolbar(),
             )
           else
-            Expanded(
-              child: _NavItem(
-                Icons.content_cut,
-                'Edit',
-                onTap: () => provider.showToolbar(),
-                active: false,
-              ),
-            ),
-
-          // Speed
-          Expanded(
-            child: _NavItem(
-              Icons.speed,
-              'Speed',
-              onTap: () => provider.openTool('speed'),
-              active: provider.currentTool == 'speed',
-            ),
-          ),
-
-          // Audio
-          Expanded(
-            child: _NavItem(
-              Icons.music_note,
-              'Audio',
+            _NavItem(
+              Icons.content_cut,
+              'Edit',
               onTap: () {
-                if (provider.selectedVideoTrackId == null && provider.selectedAudioTrack == null) {
-                  provider.openAudioContextToolbar();
-                } else {
-                  provider.openTool('audio');
+                final p = Provider.of<VideoEditorProvider>(
+                  context,
+                  listen: false,
+                );
+                final currentPos = p.currentPosition;
+                final currentTrack = p.videoTracks.firstWhereOrNull(
+                  (t) => currentPos >= t.startTime && currentPos < t.endTime,
+                );
+                if (currentTrack != null) {
+                  p.selectVideoTrack(currentTrack.id);
                 }
+                p.openEditContextToolbar(); // ← New method
               },
-              active: provider.currentTool == 'audio' || provider.showAudioContextToolbar,
             ),
+
+          _NavItem(
+            Icons.speed,
+            'Speed',
+            onTap: () {
+              final p = Provider.of<VideoEditorProvider>(
+                context,
+                listen: false,
+              );
+
+              // Optional: auto-select current clip if none selected
+              if (p.selectedVideoTrackId == null) {
+                final currentPos = p.currentPosition;
+                final currentTrack = p.videoTracks.firstWhereOrNull(
+                  (t) => currentPos >= t.startTime && currentPos < t.endTime,
+                );
+                if (currentTrack != null) {
+                  p.selectVideoTrack(currentTrack.id);
+                }
+              }
+
+              p.openEditContextToolbar(); // ← Only this!
+            },
+          ),
+          _NavItem(
+            Icons.music_note,
+            'Audio',
+            onTap: () => provider.openAudioContextToolbar(),
           ),
 
-          // Text
-          Expanded(
-            child: _NavItem(
-              Icons.text_fields,
-              'Text',
-              onTap: () => provider.openTool('text'),
-              active: provider.currentTool == 'text',
-            ),
+          _NavItem(
+            Icons.text_fields,
+            'Text',
+            onTap:
+                () =>
+                    provider
+                        .openEditContextToolbar(), // or make 'text' mode later
+            active: provider.currentTool == 'text',
           ),
 
-          // Effect
-          Expanded(
-            child: _NavItem(
-              Icons.auto_awesome,
-              'Effect',
-              onTap: () => provider.openTool('effect'),
-              active: provider.currentTool == 'effect',
-            ),
+          _NavItem(
+            Icons.auto_awesome,
+            'Effect',
+            onTap: () => provider.openEditContextToolbar(),
+            active: provider.currentTool == 'effect',
           ),
         ],
       ),
@@ -94,12 +102,7 @@ class _NavItem extends StatelessWidget {
   final bool active;
   final VoidCallback? onTap;
 
-  const _NavItem(
-      this.icon,
-      this.label, {
-        this.active = false,
-        this.onTap,
-      });
+  const _NavItem(this.icon, this.label, {this.active = false, this.onTap});
 
   @override
   Widget build(BuildContext context) {

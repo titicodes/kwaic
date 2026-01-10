@@ -15,7 +15,7 @@ import '../widgets/bottom_navbar_widget.dart';
 import '../widgets/context_toolbar_widget.dart'; // EditContextToolbar
 import '../widgets/fill_bottom_sheet.dart' as fill;
 import '../widgets/flip_bottom_sheet.dart' as flip;
-import '../widgets/rotate_bottom_sheet.dart' as rotate;
+import '../widgets/rotate_bottom_sheet.dart' ;
 import '../widgets/speed_bottom_sheet.dart';
 import '../widgets/text_bottom_sheet.dart';
 import '../widgets/text_to_audio_sheet.dart';
@@ -122,8 +122,7 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
                     _PlaybackControls(provider: provider),
                     const SizedBox(height: 4),
                     const TimelineWidget(),
-                    // REMOVE THE FIXED SizedBox(height: 160)
-                    // No extra space needed — Stack handles overlays
+
                   ],
                 ),
 
@@ -136,23 +135,24 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
                 ),
 
                 // Bottom Sheets (Speed, Audio, Text, etc.)
+                // Context toolbar
+                if (provider.showContextToolbar)
+                  Positioned(
+                    bottom: 72,                 // just above bottom nav
+                    left: 0,
+                    right: 0,
+                    child: provider.toolbarType == 'audio'
+                        ? const AudioContextToolbar()
+                        : const EditContextToolbar(),
+                  ),
+
+// Bottom sheets — take full space above nav when no toolbar
                 if (provider.showBottomSheet)
                   Positioned(
-                    bottom: provider.showContextToolbar ? 80 : 72, // Above toolbar or nav
+                    bottom: 72,
                     left: 0,
                     right: 0,
                     child: _buildActiveBottomSheet(provider.currentTool, provider),
-                  ),
-
-                // Context Toolbars — only when visible
-                if (provider.showContextToolbar)
-                  Positioned(
-                    bottom: 72, // Always just above BottomNavBar
-                    left: 0,
-                    right: 0,
-                    child: provider.showAudioContextToolbar
-                        ? const AudioContextToolbar()
-                        : const EditContextToolbar(),
                   ),
               ],
             ),
@@ -161,15 +161,14 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
       },
     );
   }
-
   Widget _buildActiveBottomSheet(String tool, VideoEditorProvider provider) {
-    // Video tools require selection
+    // Safety: Video tools require a selected video clip
     if (['trim', 'rotate', 'flip', 'fill', 'speed'].contains(tool)) {
       if (provider.selectedVideoTrackId == null) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           provider
             ..showBottomSheet = false
-            ..showContextToolbar = true;
+            ..showContextToolbar = true; // Re-show parent toolbar
         });
         return const Center(
           child: Text(
@@ -185,28 +184,42 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
         return const TrimBottomSheet();
 
       case 'rotate':
-        return rotate.RotateBottomSheet(
+        return RotateBottomSheet(
           onClose: () {
             provider.rotation = 0.0;
-            provider
-              ..showBottomSheet = false
-              ..showContextToolbar = true;
+            provider.flipHorizontal = false;
+            provider.flipVertical = false;
+            provider.closeContextToolbar(); // Revert to parent (Edit/Audio)
           },
           onApply: () {
-            final current = provider.videoTracks[provider.selectedTrackIndex];
+            final index = provider.selectedTrackIndex;
+            if (index < 0 || index >= provider.videoTracks.length) return;
+
+            final current = provider.videoTracks[index];
             final updated = current.copyWith(
               rotation: current.rotation + provider.rotation,
+              flipHorizontal: provider.flipHorizontal,
+              flipVertical: provider.flipVertical,
             );
-            provider.replaceTrack(provider.selectedTrackIndex, updated);
+
+            provider.replaceTrack(index, updated);
+
+            // Reset preview values
             provider.rotation = 0.0;
-            provider
-              ..showBottomSheet = false
-              ..showContextToolbar = true;
+            provider.flipHorizontal = false;
+            provider.flipVertical = false;
+
+            provider.closeContextToolbar(); // Back to parent toolbar
           },
           onRotate: (angle) {
             provider.rotation += angle;
           },
-          onFlip: () {},
+          onFlipHorizontal: () {
+            provider.flipHorizontal = !provider.flipHorizontal;
+          },
+          onFlipVertical: () {
+            provider.flipVertical = !provider.flipVertical;
+          },
         );
 
       case 'flip':
@@ -214,22 +227,23 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
           onClose: () {
             provider.flipHorizontal = false;
             provider.flipVertical = false;
-            provider
-              ..showBottomSheet = false
-              ..showContextToolbar = true;
+            provider.closeContextToolbar();
           },
           onApply: () {
-            final current = provider.videoTracks[provider.selectedTrackIndex];
+            final index = provider.selectedTrackIndex;
+            if (index < 0 || index >= provider.videoTracks.length) return;
+
+            final current = provider.videoTracks[index];
             final updated = current.copyWith(
               flipHorizontal: provider.flipHorizontal,
               flipVertical: provider.flipVertical,
             );
-            provider.replaceTrack(provider.selectedTrackIndex, updated);
+
+            provider.replaceTrack(index, updated);
+
             provider.flipHorizontal = false;
             provider.flipVertical = false;
-            provider
-              ..showBottomSheet = false
-              ..showContextToolbar = true;
+            provider.closeContextToolbar();
           },
           onFlip: (bool horizontal) {
             if (horizontal) {
@@ -244,20 +258,20 @@ class _VideoEditorScreensState extends State<VideoEditorScreens> {
         return fill.FillBottomSheet(
           onClose: () {
             provider.resetCrop();
-            provider
-              ..showBottomSheet = false
-              ..showContextToolbar = true;
+            provider.closeContextToolbar();
           },
           onApply: () {
-            final current = provider.videoTracks[provider.selectedTrackIndex];
+            final index = provider.selectedTrackIndex;
+            if (index < 0 || index >= provider.videoTracks.length) return;
+
+            final current = provider.videoTracks[index];
             final updated = current.copyWith(
               cropRect: provider.previewCropRect,
               cropZoom: provider.previewCropZoom,
             );
-            provider.replaceTrack(provider.selectedTrackIndex, updated);
-            provider
-              ..showBottomSheet = false
-              ..showContextToolbar = true;
+
+            provider.replaceTrack(index, updated);
+            provider.closeContextToolbar();
           },
         );
 

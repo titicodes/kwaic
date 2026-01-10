@@ -107,6 +107,83 @@ class VideoEditorProvider with ChangeNotifier {
   bool _isDraggingClip = false;
 
   bool get isDraggingClip => _isDraggingClip;
+  // Preview state (in seconds, relative to track start)
+  double _audioPreviewStartSec = 0.0;
+  double _audioPreviewEndSec = 0.0;
+
+  double get audioPreviewStartSec => _audioPreviewStartSec;
+  double get audioPreviewEndSec => _audioPreviewEndSec;
+
+// Start preview (called from sheet init)
+  void startAudioTrimPreview() {
+    final track = selectedAudioTrack;
+    if (track == null) return;
+
+    _audioPreviewStartSec = 0.0; // relative to track start
+    _audioPreviewEndSec = track.duration;
+    notifyListeners();
+  }
+
+// Preview updates
+  void previewAudioTrimStart(double newRelativeStartSec) {
+    _audioPreviewStartSec = newRelativeStartSec.clamp(0.0, _audioPreviewEndSec - 0.1);
+    notifyListeners();
+  }
+
+  void previewAudioTrimEnd(double newRelativeEndSec) {
+    _audioPreviewEndSec = newRelativeEndSec.clamp(_audioPreviewStartSec + 0.1, selectedAudioTrack?.duration ?? 100.0);
+    notifyListeners();
+  }
+
+// Apply real trim
+  Future<void> applyAudioTrim() async {
+    final track = selectedAudioTrack;
+    if (track == null) return;
+
+    final newStartSec = track.start + _audioPreviewStartSec; // global timeline start
+    final newDurationSec = _audioPreviewEndSec - _audioPreviewStartSec;
+
+    if (newDurationSec <= 0) return;
+
+    final outputPath = '${track.path}_trimmed_${DateTime.now().millisecondsSinceEpoch}.mp3';
+
+    final command = '-i "${track.path}" '
+        '-ss $_audioPreviewStartSec '  // trim from relative start
+        '-t $newDurationSec '          // duration to keep
+        '-c copy "$outputPath"';
+
+    final session = await FFmpegKit.execute(command);
+    final rc = await session.getReturnCode();
+
+    if (ReturnCode.isSuccess(rc)) {
+      final updatedTrack = track.copyWith(
+        path: outputPath,
+        start: newStartSec,           // keep global position
+        duration: newDurationSec,
+        originalDuration: track.originalDuration,
+      );
+
+      final index = audioTracks.indexWhere((t) => t.id == track.id);
+      if (index != -1) {
+        audioTracks[index] = updatedTrack;
+        await updatedTrack.player.setFilePath(outputPath);
+      }
+
+      // Reset preview
+      _audioPreviewStartSec = 0.0;
+      _audioPreviewEndSec = 0.0;
+      notifyListeners();
+    } else {
+      debugPrint('Audio trim FFmpeg failed');
+    }
+  }
+
+// End preview
+  void endAudioTrimPreview() {
+    _audioPreviewStartSec = 0.0;
+    _audioPreviewEndSec = 0.0;
+    notifyListeners();
+  }
 
   set isDraggingClip(bool value) {
     if (_isDraggingClip == value) return;
@@ -117,9 +194,136 @@ class VideoEditorProvider with ChangeNotifier {
   bool _isTrimming = false;
   bool get isTrimming => _isTrimming;
 
+  String _toolbarType = '';  // ← ADD THIS private field
+
+  // Getter (what your widget uses)
+  String get toolbarType => _toolbarType;
+
+  // Optional: public setter if you want to change it from outside
+  set toolbarType(String value) {
+    _toolbarType = value;
+    notifyListeners();
+  }
+
+ // Audio trim preview state (in seconds)
+  double _audioPreviewStart = 0.0;
+  double _audioPreviewEnd = 0.0;
+
+  double get audioPreviewStart => _audioPreviewStart;
+  double get audioPreviewEnd => _audioPreviewEnd;
+
+
+  void openToolSheet(String tool) {
+    currentTool = tool;
+    showBottomSheet = true;
+
+    // Most common & clean UX: hide context toolbar during deep editing
+    showContextToolbar = false;         // ← Key line!
+
+    notifyListeners();
+  }
+
+  // Helper methods (recommended - cleaner API)
+  void setToolbarType(String type) {
+    _toolbarType = type;
+    notifyListeners();
+  }
+
+  void openAudioContextToolbar() {
+    _toolbarType = 'audio';
+    showContextToolbar = true;
+    showBottomSheet = false;        // CRITICAL: prevent sheet from opening
+    currentTool = '';               // Clear any lingering tool
+    notifyListeners();
+  }
+
+  void openEditContextToolbar() {
+    _toolbarType = 'edit';
+    showContextToolbar = true;
+    showBottomSheet = false;
+    currentTool = '';
+    notifyListeners();
+  }
+
+
+  double get totalTimelineSeconds {
+    double maxEnd = 0.0;
+
+    // Video tracks
+    for (final v in videoTracks) {
+      final end = v.endTime.inMilliseconds / 1000.0;
+      maxEnd = math.max(maxEnd, end);
+    }
+
+    // Audio tracks (double-backed, via getters)
+    for (final a in audioTracks) {
+      final end = a.endTime.inMilliseconds / 1000.0;
+      maxEnd = math.max(maxEnd, end);
+    }
+
+    // Text tracks (Duration-backed)
+    for (final t in textTracks) {
+      final end =
+          (t.startTime.inMilliseconds + t.duration.inMilliseconds) / 1000.0;
+      maxEnd = math.max(maxEnd, end);
+    }
+
+    final padding = math.max(5.0, maxEnd * 0.1);
+    return maxEnd + padding;
+  }
+
   void startTrimPreview() {
     _isTrimming = true;
     pause();
+  }
+
+  void addAudioTrack(AudioTrack track) {
+    audioTracks.add(track);
+    audioTracks.sort((a, b) => a.start.compareTo(b.start));
+    notifyListeners();
+  }
+
+  // Force open Edit toolbar (default when something is selected)
+  void showEditContextToolbar() {
+    _activeContextToolbar = 'edit';
+    _showContextToolbar = true;
+    _showAudioContextToolbar = false; // Explicitly disable audio one
+    notifyListeners();
+  }
+
+// General open with type (used internally)
+  void openContextToolbar(String type) {
+    _activeContextToolbar = type;
+    _showContextToolbar = true;
+    if (type == 'audio') {
+      _showAudioContextToolbar = true;
+    } else {
+      _showAudioContextToolbar = false;
+    }
+    notifyListeners();
+  }
+
+// Close everything cleanly
+  void closeContextToolbar() {
+    _activeContextToolbar = null;
+    _showContextToolbar = false;
+    _showAudioContextToolbar = false;
+    notifyListeners();
+  }
+
+// Auto-sync when selection changes (call this everywhere selection happens)
+  void _syncContextToolbarVisibility() {
+    if (selectedVideoTrackId != null ||
+        selectedAudioTrack != null ||
+        selectedTextTrack != null) {
+      // Something selected → show Edit toolbar by default (unless audio is forced)
+      if (_activeContextToolbar != 'audio') {
+        showEditContextToolbar();
+      }
+    } else {
+      // Nothing selected → hide all
+      closeContextToolbar();
+    }
   }
 
   // Add this static navigator key (you already have it — just confirm)
@@ -130,13 +334,6 @@ class VideoEditorProvider with ChangeNotifier {
   bool _showAudioContextToolbar = false;
   bool get showAudioContextToolbar => _showAudioContextToolbar;
 
-  void openAudioContextToolbar() {
-    _showContextToolbar = true;
-    _showAudioContextToolbar = true;
-    _showBottomSheet = false;
-    _currentTool = '';
-    notifyListeners();
-  }
 
   void hideAllToolbars() {
     _showContextToolbar = false;
@@ -146,31 +343,84 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  void handleAudioToolTap(String action) async {
+  void handleAudioToolTap(String action,{required BuildContext context}) async {
     switch (action) {
       case 'extract':
-        await _showVideoPickerForExtraction();
+        await _showVideoPickerForExtraction(context: context);
         break;
+
       case 'sound':
-        openTool('audio');
+        openTool('audio');  // → Opens AudioLibrarySheet
         break;
+
       case 'soundfx':
-        openTool('soundfx');
+        openTool('soundfx');  // → Opens SoundFXSheet
         break;
+
       case 'record':
-        openTool('record');
+        openTool('record');  // → Opens VoiceoverRecorder
         break;
+
       case 'texttoaudio':
-        openTool('texttoaudio');
+        openTool('texttoaudio');  // → Opens TextToAudioSheet
         break;
     }
 
-    hideAllToolbars(); // Optional: close toolbar after selection
+  }
+
+  void moveAudio(AudioTrack track, double newStart) {
+    track.start = newStart;
+    notifyListeners();
+  }
+
+  void togglePlayPause() {
+    if (_videoController == null) return;
+
+    if (_videoController!.value.isPlaying) {
+      _videoController!.pause();
+      _stopScrollTimer();
+    } else {
+      _videoController!.play();
+      _ensureScrollTimerRunning();
+    }
+
+    _isPlaying = _videoController!.value.isPlaying;
+    _syncAudioTracks(_currentPosition);
+    notifyListeners();
+  }
+
+  void selectVideoTrack(String? trackId) {
+    if (trackId == null) return;
+
+    selectedVideoTrackId = trackId;
+    selectedAudioTrack = null;
+    selectedTextTrack = null;
+
+    final index = videoTracks.indexWhere((t) => t.id == trackId);
+    if (index != -1) {
+      selectedTrackIndex = index;
+      switchToClip(videoTracks[index]);
+    }
+
+    // Force correct toolbar
+    _toolbarType = 'edit';
+    showContextToolbar = true;
+    showBottomSheet = false;
+    currentTool = '';
+
+    notifyListeners();
+  }
+
+  void clearSelection() {
+    selectedVideoTrackId = null;
+    selectedAudioTrack = null;
+    selectedTextTrack = null;
+    _syncContextToolbarVisibility();
+    notifyListeners();
   }
 
   void pause() {
     if (_videoController == null) return;
-
     if (_videoController!.value.isPlaying) {
       _videoController!.pause();
       _isPlaying = false;
@@ -251,22 +501,16 @@ class VideoEditorProvider with ChangeNotifier {
     }
   }
 
-  void togglePlayPause() {
-    if (_videoController == null) return;
-    if (_videoController!.value.isPlaying) {
-      _videoController!.pause();
-    } else {
-      _videoController!.play();
-    }
-    _isPlaying = _videoController!.value.isPlaying;
-    notifyListeners();
-  }
-
   void selectAudio(AudioTrack track) {
     selectedAudioTrack = track;
     selectedVideoTrackId = null;
     selectedTextTrack = null;
-    showToolbar(); // Only show when user taps
+
+    _toolbarType = 'audio';
+    showContextToolbar = true;
+    showBottomSheet = false;
+    currentTool = '';
+
     notifyListeners();
   }
 
@@ -277,6 +521,7 @@ class VideoEditorProvider with ChangeNotifier {
     if (selectedTextTrack != null) {
       showToolbar(); // Show toolbar when text is tapped
     }
+    _syncContextToolbarVisibility();
     notifyListeners();
   }
 
@@ -285,31 +530,6 @@ class VideoEditorProvider with ChangeNotifier {
     _videoController!.seekTo(time);
   }
 
-  void selectVideoTrack(String? trackId) {
-    if (trackId == null) return;
-
-    selectedVideoTrackId = trackId;
-    selectedAudioTrack = null;
-
-    final index = videoTracks.indexWhere((t) => t.id == trackId);
-    if (index != -1) {
-      selectedTrackIndex = index;
-      switchToClip(videoTracks[index]); // Preview shows tapped clip
-    }
-
-    showToolbar(); // Only now — because user tapped
-    notifyListeners();
-  }
-
-  // void updateActiveClip(Duration globalTime) {
-  //   final index = videoTracks.indexWhere(
-  //         (t) => globalTime >= t.startTime && globalTime < t.endTime,
-  //   );
-  //
-  //   if (index == selectedTrackIndex) return;
-  //
-  //   switchToClip(videoTracks[index], seekToGlobal: globalTime);
-  // }
 
   void _updatePosition() {
     if (_videoController == null) return;
@@ -366,30 +586,6 @@ class VideoEditorProvider with ChangeNotifier {
     return Duration(seconds: totalTimelineSeconds.toInt());
   }
 
-  double get totalTimelineSeconds {
-    double maxEnd = 0.0;
-
-    // Video tracks
-    for (final v in videoTracks) {
-      final end = v.endTime.inMilliseconds / 1000.0;
-      maxEnd = math.max(maxEnd, end);
-    }
-
-    // Audio tracks
-    for (final a in audioTracks) {
-      final end = a.start + a.duration;
-      maxEnd = math.max(maxEnd, end);
-    }
-
-    // Text tracks
-    for (final t in textTracks) {
-      final end = (t.startTime + t.duration).inMilliseconds / 1000.0;
-      maxEnd = math.max(maxEnd, end);
-    }
-
-    return maxEnd + 2; // padding
-  }
-
   void openTool(String tool) {
     _currentTool = tool;
     _showBottomSheet = true;
@@ -438,10 +634,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  void moveAudio(AudioTrack track, double newStart) {
-    track.start = newStart;
-    notifyListeners();
-  }
 
   void applySpeedToSelectedTrack() {
     final track = videoTracks[selectedTrackIndex];
@@ -499,12 +691,6 @@ class VideoEditorProvider with ChangeNotifier {
     videoTracks.sort((a, b) => a.startTime.compareTo(b.startTime));
     audioTracks.sort((a, b) => a.start.compareTo(b.start));
 
-    notifyListeners();
-  }
-
-  // 🔹 ADD AUDIO
-  void addAudioTrack(AudioTrack track) {
-    audioTracks.add(track);
     notifyListeners();
   }
 
@@ -787,17 +973,6 @@ class VideoEditorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  @override
-  void dispose() {
-    _videoController?.removeListener(_updateVideoPosition);
-    _videoController?.dispose();
-    _pendingThumbnailJobs.clear();
-    for (final track in audioTracks) {
-      track.player.dispose();
-    }
-
-    super.dispose();
-  }
 
   set currentTime(Duration time) {
     _currentPosition = time;
@@ -959,7 +1134,8 @@ class VideoEditorProvider with ChangeNotifier {
   Future<List<Uint8List>> generateClipThumbnails({
     required String videoPath,
     required Duration duration,
-  }) async {
+  })
+  async {
     if (freezeHeavyTasksDuringPlayback && _isPlaying) {
       return <Uint8List>[];
     }
@@ -1116,31 +1292,42 @@ class VideoEditorProvider with ChangeNotifier {
     required File file,
     required Duration start,
     String? linkedClipId,
-  }) async {
+  })
+  async {
     try {
       final tmp = await getTemporaryDirectory();
       final double startSeconds = start.inMilliseconds / 1000.0;
+
+      // Create player and wait properly for real duration
       final player = AudioPlayer();
       await player.setFilePath(file.path);
-      final dur = player.duration ?? const Duration(seconds: 10); // Fallback
-      final durationSeconds = dur.inMilliseconds / 1000.0;
-      final fullDuration = player.duration ?? Duration(seconds: 10);
 
-      final waveFile = File(
-        '${tmp.path}/wave_${DateTime.now().millisecondsSinceEpoch}.wave',
-      );
-      Waveform? waveform;
-      final stream = JustWaveform.extract(
-        audioInFile: file,
-        waveOutFile: waveFile,
-      );
-      await for (final progress in stream) {
-        if (progress.waveform != null) {
-          waveform = progress.waveform!;
-        }
+      Duration? realDuration;
+      for (int i = 0; i < 20; i++) {  // max ~4 sec wait
+        await Future.delayed(const Duration(milliseconds: 200));
+        realDuration = player.duration;
+        if (realDuration != null && realDuration > Duration.zero) break;
       }
-      if (await waveFile.exists()) {
-        await waveFile.delete();
+
+      final durationSeconds = realDuration!.inMilliseconds / 1000.0 ?? 30.0;
+
+      // Waveform generation (more robust)
+      Waveform? waveform;
+      try {
+        final waveFile = File('${tmp.path}/wave_${const Uuid().v4()}.wave');
+        final stream = JustWaveform.extract(
+          audioInFile: file,
+          waveOutFile: waveFile,
+        );
+        await for (final progress in stream.timeout(const Duration(seconds: 12))) {
+          if (progress.waveform != null) {
+            waveform = progress.waveform;
+            break;
+          }
+        }
+        if (await waveFile.exists()) await waveFile.delete();
+      } catch (e) {
+        debugPrint('Waveform generation failed: $e');
       }
 
       final newTrack = AudioTrack(
@@ -1153,8 +1340,14 @@ class VideoEditorProvider with ChangeNotifier {
         linkedClipId: linkedClipId,
         originalDuration: durationSeconds,
       );
-      audioTracks.add(newTrack);
+
+      addAudioTrack(newTrack);  // Use consistent helper
+
+      // Optional: auto-scroll timeline to new track
+      timelineCameraSeconds = startSeconds - 5; // center it with some padding
       notifyListeners();
+
+      debugPrint('Audio added: ${file.path} | duration: $durationSeconds s | start: $startSeconds s');
     } catch (e, stack) {
       debugPrint('❌ Error adding audio: $e');
       debugPrint(stack.toString());
@@ -1352,10 +1545,6 @@ class VideoEditorProvider with ChangeNotifier {
 
   String? selectedVideoTrackId;
 
-  void clearSelection() {
-    selectedVideoTrackId = null;
-    notifyListeners();
-  }
 
   void updateTextPosition(TextTrack track, Offset normalized) {
     final index = textTracks.indexWhere((t) => t.id == track.id);
@@ -1466,7 +1655,7 @@ class VideoEditorProvider with ChangeNotifier {
     controller.addListener(() {
       if (!controller.value.isInitialized) return;
 
-      // 🔒 TRIM LOOP GUARD (CRITICAL)
+      // Trim loop guard
       if (_isTrimming && controller.value.isPlaying) {
         final pos = controller.value.position;
         if (pos >= _trimEnd) {
@@ -1483,33 +1672,49 @@ class VideoEditorProvider with ChangeNotifier {
       _syncAudioTracks(_currentPosition);
 
       _currentTimeSeconds = _currentPosition.inMilliseconds / 1000.0;
-
       _isPlaying = controller.value.isPlaying;
 
-      if (!_isSwitchingClip &&
-          localPos >= localDuration - const Duration(milliseconds: 16)) {
+      // Handle clip end
+      if (!_isSwitchingClip && localPos >= localDuration - const Duration(milliseconds: 16)) {
         _handleClipEnd();
       }
 
-      if (_isPlaying &&
-          !isDraggingClip &&
-          !isScrubbingTimeline &&
-          timelineScrollController.hasClients) {
-        final viewportCenter =
-            timelineScrollController.position.viewportDimension / 2;
-
-        final offset =
-            (_currentPosition.inMilliseconds / 1000.0) * pixelsPerSecond -
-            viewportCenter;
-
-        timelineScrollController.jumpTo(
-          offset.clamp(0.0, timelineScrollController.position.maxScrollExtent),
-        );
+      // Only update timeline scroll when playing & not dragging/scrubbing
+      if (_isPlaying && !isDraggingClip && !isScrubbingTimeline && timelineScrollController.hasClients) {
+        _ensureScrollTimerRunning(); // ← Safe, idempotent call
       }
 
       notifyListeners();
     });
   }
+
+// Helper to start timer only once
+  void _ensureScrollTimerRunning() {
+    if (_scrollTimer?.isActive ?? false) return;
+
+    _scrollTimer = Timer.periodic(const Duration(milliseconds: 80), (_) {
+      if (!_isPlaying || isDraggingClip || isScrubbingTimeline) {
+        _stopScrollTimer();
+        return;
+      }
+
+      final pos = effectiveCurrentPosition; // Use master position (video or audio)
+      if (timelineScrollController.hasClients) {
+        final viewportCenter = timelineScrollController.position.viewportDimension / 2;
+        final offset = (pos.inMilliseconds / 1000.0) * pixelsPerSecond - viewportCenter;
+
+        timelineScrollController.jumpTo(
+          offset.clamp(0.0, timelineScrollController.position.maxScrollExtent),
+        );
+      }
+    });
+  }
+
+  void _stopScrollTimer() {
+    _scrollTimer?.cancel();
+    _scrollTimer = null;
+  }
+
 
   Future<void> _switchToClip(VideoTrack track) async {
     final oldController = _videoController;
@@ -1535,7 +1740,8 @@ class VideoEditorProvider with ChangeNotifier {
   /// Add multiple videos sequentially to the timeline
   Future<void> addMultipleVideosSequentially(
     List<Map<String, dynamic>> videosWithThumbs,
-  ) async {
+  )
+  async {
     _videoTracks.clear();
     _selectedTrackIndex = 0;
 
@@ -1590,46 +1796,28 @@ class VideoEditorProvider with ChangeNotifier {
   }
 
   void _syncAudioTracks(Duration timelinePosition) {
-    final currentClip = videoTracks[selectedTrackIndex];
-    if (!currentClip.audioMuted) {
-      // Play video audio normally (via videoController)
-    } else {
-      videoController?.setVolume(0.0); // Or handle separately if needed
-    }
-
     for (final track in audioTracks) {
       final audioStart = Duration(milliseconds: (track.start * 1000).round());
-      final audioEnd =
-          audioStart + Duration(milliseconds: (track.duration * 1000).round());
+      final audioEnd = audioStart + Duration(milliseconds: (track.duration * 1000).round());
+      final isInside = timelinePosition >= audioStart && timelinePosition < audioEnd;
 
-      final isInside =
-          timelinePosition >= audioStart && timelinePosition < audioEnd;
+      if (isInside) {
+        final localPos = timelinePosition - audioStart;
 
-      if (!isInside) {
-        // 🔇 Ensure silence outside range
+        // Seek if drifted more than 100ms (prevents desync)
+        if ((track.player.position - localPos).abs() > const Duration(milliseconds: 100)) {
+          track.player.seek(localPos);
+        }
+
+        // Play if video is playing and audio is not
+        if (_isPlaying && !track.player.playing) {
+          track.player.play();
+        }
+      } else {
+        // Pause if outside range
         if (track.player.playing) {
           track.player.pause();
         }
-        continue;
-      }
-
-      // 🎯 Compute local audio offset
-      final localAudioPos = timelinePosition - audioStart;
-
-      // 🔄 Seek if drifted (important)
-      final current = track.player.position;
-      if ((current - localAudioPos).abs() > const Duration(milliseconds: 40)) {
-        track.player.seek(localAudioPos);
-      }
-
-      // ▶️ Play only if timeline is playing
-      if (_isPlaying && !track.player.playing) {
-        track.player.play();
-      }
-
-      // ⏸ Pause if timeline paused
-      if (!_isPlaying && track.player.playing) {
-        track.player.pause();
       }
     }
   }
@@ -1637,7 +1825,8 @@ class VideoEditorProvider with ChangeNotifier {
   Future<void> replaceAudioTrack({
     required AudioTrack oldTrack,
     required File newFile,
-  }) async {
+  })
+  async {
     try {
       // 1️⃣ Stop old audio
       await oldTrack.player.stop();
@@ -1814,56 +2003,13 @@ class VideoEditorProvider with ChangeNotifier {
     }
   }
 
-  void previewAudioTrimStart(double startSeconds) {
-    audioTrimStart = Duration(milliseconds: (startSeconds * 1000).round());
-    notifyListeners();
-  }
-
-  void previewAudioTrimEnd(double endSeconds) {
-    audioTrimEnd = Duration(milliseconds: (endSeconds * 1000).round());
-    notifyListeners();
-  }
-
-  Future<void> applyAudioTrim(
-    AudioTrack track,
-    Duration newStartTime,
-    Duration newEndTime,
-  ) async {
-    final newDurationSeconds =
-        (newEndTime - newStartTime).inMilliseconds / 1000.0;
-    final outputPath =
-        '${track.path}_trimmed_${DateTime.now().millisecondsSinceEpoch}.mp3';
-
-    final command =
-        '-i "${track.path}" -ss ${newStartTime.inSeconds}.${newStartTime.inMilliseconds % 1000} '
-        '-to ${newEndTime.inSeconds}.${newEndTime.inMilliseconds % 1000} -c copy "$outputPath"';
-
-    final session = await FFmpegKit.execute(command);
-    final rc = await session.getReturnCode();
-
-    if (ReturnCode.isSuccess(rc)) {
-      final trimmed = track.copyWith(
-        path: outputPath,
-        duration: newDurationSeconds,
-        start: newStartTime.inMilliseconds / 1000.0,
-      );
-
-      final index = audioTracks.indexWhere((t) => t.id == track.id);
-      if (index != -1) {
-        audioTracks[index] = trimmed;
-        await trimmed.player.setFilePath(outputPath);
-        // Re-extract waveform if needed
-      }
-      notifyListeners();
-    }
-  }
-
   Future<bool> trimAudio({
     required String inputPath,
     required String outputPath,
     required Duration start,
     required Duration end,
-  }) async {
+  })
+  async {
     final command =
         '-i "$inputPath" -ss ${start.inSeconds} -to ${end.inSeconds} -c copy "$outputPath"';
     final session = await FFmpegKit.execute(command);
@@ -1883,42 +2029,64 @@ class VideoEditorProvider with ChangeNotifier {
     await File(path).writeAsString(json);
   }
 
-  Future<void> _showVideoPickerForExtraction() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.video,
-      allowMultiple: true,
-    );
+  Future<void> _showVideoPickerForExtraction({required BuildContext context}) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.video,                // Primary restriction: videos only
+        allowMultiple: true,
+        allowedExtensions: ['mp4', 'mov', 'avi', 'mkv', 'webm'], // Extra safety net
+      );
 
-    if (result == null || result.files.isEmpty) {
-      hideAllToolbars();
-      return;
-    }
+      if (result == null || result.files.isEmpty) {
+        debugPrint('No files selected');
+        hideAllToolbars();
+        return;
+      }
 
-    final videoPaths = result.files
-        .where((f) => f.path != null)
-        .map((f) => f.path!)
-        .toList();
+      // Extra filter in case picker ignores type (rare but happens)
+      final videoPaths = result.files
+          .where((f) => f.path != null &&
+          (f.path!.toLowerCase().endsWith('.mp4') ||
+              f.path!.toLowerCase().endsWith('.mov') ||
+              f.path!.toLowerCase().endsWith('.avi') ||
+              f.path!.toLowerCase().endsWith('.mkv') ||
+              f.path!.toLowerCase().endsWith('.webm')))
+          .map((f) => f.path!)
+          .toList();
 
-    // Use a local context from the current widget tree
-    final context = navigatorKey.currentContext;
-    if (context == null || !context.mounted) return;
+      if (videoPaths.isEmpty) {
+        debugPrint('No valid video files selected');
+        // Optional: show toast/snackbar "Please select video files"
+        hideAllToolbars();
+        return;
+      }
 
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => VideoExtractionScreen(
-          selectedVideos: videoPaths,
-          onExtract: () async {
-            await _performAudioExtraction(videoPaths);
-            if (context.mounted) {
-              Navigator.of(context).pop();
-            }
-          },
+      debugPrint('Selected videos: $videoPaths');
+
+      final context = navigatorKey.currentContext;
+      if (context == null || !context.mounted) {
+        debugPrint('Context not available');
+        return;
+      }
+
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => VideoExtractionScreen(
+            selectedVideos: videoPaths,
+            onExtract: () async {
+              await _performAudioExtraction(videoPaths);
+              if (context.mounted) Navigator.of(context).pop();
+            },
+          ),
+          fullscreenDialog: true,
         ),
-        fullscreenDialog: true,
-      ),
-    );
+      );
 
-    hideAllToolbars();
+      hideAllToolbars();
+    } catch (e) {
+      debugPrint('File picker error: $e');
+      hideAllToolbars();
+    }
   }
 
   Future<void> _performAudioExtraction(List<String> videoPaths) async {
@@ -1926,52 +2094,133 @@ class VideoEditorProvider with ChangeNotifier {
     Duration insertPosition = currentPosition;
 
     for (final videoPath in videoPaths) {
-      final outputPath = '${tempDir.path}/extracted_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      final outputPath = '${tempDir.path}/extracted_audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
 
-      final command = '-i "$videoPath" -vn -acodec aac -b:a 192k "$outputPath"';
+      // Extract audio only (no video stream)
+      final command = '-i "$videoPath" -vn -acodec aac -b:a 192k -y "$outputPath"';
       final session = await FFmpegKit.execute(command);
       final rc = await session.getReturnCode();
 
-      if (!ReturnCode.isSuccess(rc)) continue;
+      if (!ReturnCode.isSuccess(rc)) {
+        debugPrint('Audio extraction failed for $videoPath');
+        continue;
+      }
 
       final audioFile = File(outputPath);
-      final player = AudioPlayer();
-      await player.setFilePath(outputPath);
-      final duration = player.duration ?? const Duration(seconds: 10);
-      await player.dispose();
+      if (!await audioFile.exists()) continue;
 
+      // Get accurate duration (robust wait)
+      final player = AudioPlayer();
+      await player.setFilePath(audioFile.path);
+
+      Duration? realDuration;
+      for (int i = 0; i < 25; i++) {  // up to ~5 seconds max wait
+        await Future.delayed(const Duration(milliseconds: 200));
+        realDuration = player.duration;
+        if (realDuration != null && realDuration > Duration.zero) break;
+      }
+
+      final duration = realDuration ?? const Duration(seconds: 30);
+      await player.dispose();  // Clean up temporary player
+
+      // Generate waveform (with timeout + cleanup)
       Waveform? waveform;
-      final waveFile = File('${tempDir.path}/wave_temp_${DateTime.now().millisecondsSinceEpoch}.wave');
+      final waveFile = File('${tempDir.path}/wave_${const Uuid().v4()}.wave');
       try {
-        final stream = JustWaveform.extract(audioInFile: audioFile, waveOutFile: waveFile);
-        await for (final p in stream) {
-          if (p.waveform != null) {
-            waveform = p.waveform;
+        final stream = JustWaveform.extract(
+          audioInFile: audioFile,
+          waveOutFile: waveFile,
+        );
+        await for (final progress in stream.timeout(const Duration(seconds: 12))) {
+          if (progress.waveform != null) {
+            waveform = progress.waveform;
             break;
           }
         }
-      } catch (_) {}
-      if (await waveFile.exists()) await waveFile.delete();
+      } catch (e) {
+        debugPrint('Waveform generation failed: $e');
+      } finally {
+        if (await waveFile.exists()) await waveFile.delete();
+      }
 
-      final newPlayer = AudioPlayer()..setFilePath(outputPath);
+      // Create **persistent** player for timeline playback
+      final newPlayer = AudioPlayer()..setFilePath(audioFile.path);
 
       final audioTrack = AudioTrack(
         id: const Uuid().v4(),
-        path: outputPath,
+        path: audioFile.path,
         duration: duration.inMilliseconds / 1000.0,
         start: insertPosition.inMilliseconds / 1000.0,
         waveform: waveform,
         player: newPlayer,
+        linkedClipId: null,  // optional: link to source video if needed
         originalDuration: duration.inMilliseconds / 1000.0,
       );
 
+      // Add to timeline (use the helper method)
       addAudioTrack(audioTrack);
+
+      // Stack next audio after this one
       insertPosition += duration;
     }
 
     notifyListeners();
+
+    // Optional: auto-center timeline on last added track
+    if (audioTracks.isNotEmpty) {
+      final lastTrack = audioTracks.last;
+      timelineCameraSeconds = lastTrack.start - 5.0; // center with padding
+      notifyListeners();
+    }
+
+
   }
 
+  Duration get effectiveCurrentPosition {
+    if (_isPlaying) {
+      // Use video position if video is playing
+      if (_videoController != null && _videoController!.value.isPlaying) {
+        return _currentPosition;
+      }
 
+      // Fallback to audio progress if no video or video paused
+      // Find the longest playing audio track as reference
+      for (final track in audioTracks) {
+        if (track.player.playing) {
+          final audioPos = Duration(milliseconds: (track.start * 1000).round()) +
+              track.player.position;
+          if (audioPos > _currentPosition) {
+            return audioPos;
+          }
+        }
+      }
+    }
+
+    // Default fallback
+    return _currentPosition;
+  }
+
+  Timer? _scrollTimer;
+
+  // In VideoEditorProvider
+
+  String? _activeContextToolbar;
+
+  String? get activeContextToolbar => _activeContextToolbar;
+
+
+
+  @override
+  void dispose() {
+    _stopScrollTimer();
+    _videoController?.removeListener(_updateVideoPosition);
+    _videoController?.dispose();
+    _pendingThumbnailJobs.clear();
+    for (final track in audioTracks) {
+      track.player.dispose();
+    }
+
+    super.dispose();
+  }
 
 }

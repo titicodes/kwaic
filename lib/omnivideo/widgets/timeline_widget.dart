@@ -63,7 +63,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
         _center = constraints.maxWidth / 2;
 
         return SizedBox(
-          height: 180,
+          height: 280,
           child: Stack(
             children: [
               // Scrollable content — now includes left section

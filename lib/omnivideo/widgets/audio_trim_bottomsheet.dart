@@ -1,9 +1,8 @@
-// widgets/audio_trim_bottom_sheet.dart
 import 'package:flutter/material.dart';
-import 'package:kwaic/nes_scr/widgets/wave_form_painter.dart';
 import 'package:provider/provider.dart';
 import '../model/audio_track.dart';
 import '../provider/video_editor_provider.dart';
+import '../../nes_scr/widgets/wave_form_painter.dart'; // your waveform painter
 
 class AudioTrimBottomSheet extends StatefulWidget {
   const AudioTrimBottomSheet({super.key});
@@ -22,23 +21,22 @@ class _AudioTrimBottomSheetState extends State<AudioTrimBottomSheet> {
     super.initState();
     final provider = context.read<VideoEditorProvider>();
     track = provider.selectedAudioTrack!;
-    provider.startTrimPreview();
+    provider.startAudioTrimPreview();
   }
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<VideoEditorProvider>();
-    final waveWidth = track.originalDuration * 80; // 80 px per second
+    final waveWidth = track.originalDuration * 80; // px per second
 
     return Container(
-      height: 240,
+      height: 280,
       decoration: const BoxDecoration(
         color: Colors.black,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
         children: [
-          // Header
           Padding(
             padding: const EdgeInsets.all(12),
             child: Row(
@@ -47,15 +45,20 @@ class _AudioTrimBottomSheetState extends State<AudioTrimBottomSheet> {
                 IconButton(
                   icon: const Icon(Icons.close, color: Colors.white),
                   onPressed: () {
-                    provider.endTrimPreview();
+                    provider.endAudioTrimPreview();
                     provider.showBottomSheet = false;
                     provider.showContextToolbar = true;
                   },
                 ),
                 const Text('Trim Audio', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                 IconButton(
-                  icon: const Icon(Icons.check, color: Colors.white),
-                  onPressed: () => _applyTrim(provider),
+                  icon: const Icon(Icons.check, color: Colors.greenAccent),
+                  onPressed: () async {
+                    await provider.applyAudioTrim();
+                    provider.endAudioTrimPreview();
+                    provider.showBottomSheet = false;
+                    provider.showContextToolbar = true;
+                  },
                 ),
               ],
             ),
@@ -65,48 +68,56 @@ class _AudioTrimBottomSheetState extends State<AudioTrimBottomSheet> {
               scrollDirection: Axis.horizontal,
               child: SizedBox(
                 width: waveWidth,
-                height: 100,
                 child: Stack(
                   children: [
-                    // In AudioTrimBottomSheet.dart
+                    // Full waveform (dimmed)
                     if (track.waveform != null)
                       CustomPaint(
                         painter: AudioWaveformPainter(
                           waveform: track.waveform!,
-                          color: Colors.white.withOpacity(0.8),
+                          color: Colors.white.withOpacity(0.4),
                         ),
                         size: Size(waveWidth, 100),
                       ),
+
+                    // Active selection (bright)
+                    ClipRect(
+                      clipper: _TrimClipper(
+                        left: startPercent * waveWidth,
+                        right: (1 - endPercent) * waveWidth,
+                      ),
+                      child: CustomPaint(
+                        painter: AudioWaveformPainter(
+                          waveform: track.waveform!,
+                          color: Colors.white.withOpacity(0.9),
+                        ),
+                        size: Size(waveWidth, 100),
+                      ),
+                    ),
+
                     // Left handle
-                    _buildHandle(
+                    Positioned(
                       left: startPercent * waveWidth - 15,
-                      onDrag: (dx) {
-                        final newP = (startPercent * waveWidth + dx) / waveWidth;
-                        setState(() => startPercent = newP.clamp(0.0, endPercent - 0.02));
-                        final ms = (startPercent * track.originalDuration * 1000).round();
-                        provider.previewAudioTrimStart(startPercent * track.originalDuration);
-                      },
+                      child: GestureDetector(
+                        onHorizontalDragUpdate: (d) {
+                          final newP = (startPercent * waveWidth + d.delta.dx) / waveWidth;
+                          setState(() => startPercent = newP.clamp(0.0, endPercent - 0.02));
+                          provider.previewAudioTrimStart(startPercent * track.originalDuration);
+                        },
+                        child: Container(width: 30, height: 100, color: Colors.transparent, alignment: Alignment.center, child: Container(width: 6, color: Colors.white)),
+                      ),
                     ),
+
                     // Right handle
-                    _buildHandle(
+                    Positioned(
                       left: endPercent * waveWidth - 15,
-                      onDrag: (dx) {
-                        final newP = (endPercent * waveWidth + dx) / waveWidth;
-                        setState(() => endPercent = newP.clamp(startPercent + 0.02, 1.0));
-                        final ms = (endPercent * track.originalDuration * 1000).round();
-                        provider.previewAudioTrimEnd(endPercent * track.originalDuration);
-                      },
-                    ),
-                    // Selection overlay
-                    IgnorePointer(
-                      child: Container(
-                        margin: EdgeInsets.only(
-                          left: startPercent * waveWidth,
-                          right: (1 - endPercent) * waveWidth,
-                        ),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.white, width: 3),
-                        ),
+                      child: GestureDetector(
+                        onHorizontalDragUpdate: (d) {
+                          final newP = (endPercent * waveWidth + d.delta.dx) / waveWidth;
+                          setState(() => endPercent = newP.clamp(startPercent + 0.02, 1.0));
+                          provider.previewAudioTrimEnd(endPercent * track.originalDuration);
+                        },
+                        child: Container(width: 30, height: 100, color: Colors.transparent, alignment: Alignment.center, child: Container(width: 6, color: Colors.white)),
                       ),
                     ),
                   ],
@@ -119,8 +130,8 @@ class _AudioTrimBottomSheetState extends State<AudioTrimBottomSheet> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(_formatDuration(Duration(seconds: (startPercent * track.originalDuration).round())), style: const TextStyle(color: Colors.white)),
-                Text(_formatDuration(Duration(seconds: (endPercent * track.originalDuration).round())), style: const TextStyle(color: Colors.white)),
+                Text(_formatDuration(Duration(seconds: (startPercent * track.originalDuration).round()))),
+                Text(_formatDuration(Duration(seconds: (endPercent * track.originalDuration).round()))),
               ],
             ),
           ),
@@ -129,35 +140,22 @@ class _AudioTrimBottomSheetState extends State<AudioTrimBottomSheet> {
     );
   }
 
-  Widget _buildHandle({required double left, required Function(double) onDrag}) {
-    return Positioned(
-      left: left.clamp(-15, double.infinity),
-      top: 0,
-      bottom: 0,
-      child: GestureDetector(
-        onHorizontalDragUpdate: (d) => onDrag(d.delta.dx),
-        child: Container(
-          width: 30,
-          alignment: Alignment.center,
-          child: Container(width: 4, color: Colors.white),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _applyTrim(VideoEditorProvider provider) async {
-    final newStart = Duration(seconds: (startPercent * track.originalDuration).round());
-    final newEnd = Duration(seconds: (endPercent * track.originalDuration).round());
-    await provider.applyAudioTrim(track, newStart, newEnd);
-    provider.endTrimPreview();
-    provider.showBottomSheet = false;
-    provider.showContextToolbar = true;
-  }
-
   String _formatDuration(Duration d) {
     final min = d.inMinutes.toString().padLeft(2, '0');
     final sec = (d.inSeconds % 60).toString().padLeft(2, '0');
-    final ms = (d.inMilliseconds % 1000 ~/ 100);
-    return '$min:$sec.$ms';
+    return '$min:$sec';
   }
+}
+
+class _TrimClipper extends CustomClipper<Rect> {
+  final double left;
+  final double right;
+
+  _TrimClipper({required this.left, required this.right});
+
+  @override
+  Rect getClip(Size size) => Rect.fromLTRB(left, 0, size.width - right, size.height);
+
+  @override
+  bool shouldReclip(CustomClipper<Rect> oldClipper) => true;
 }

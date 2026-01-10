@@ -1,6 +1,6 @@
-// widgets/edit_context_toolbar.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../provider/video_editor_provider.dart';
 
 class EditContextToolbar extends StatelessWidget {
@@ -9,49 +9,64 @@ class EditContextToolbar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = Provider.of<VideoEditorProvider>(context);
-    final bool hasSelection = provider.selectedVideoTrackId != null || provider.selectedAudioTrack != null;
+    final toolbarType = provider.toolbarType;
 
-    // Only show if something is selected
-    if (!hasSelection) return const SizedBox.shrink();
+    // Show only when toolbar is requested
+    if (!provider.showContextToolbar) return const SizedBox.shrink();
 
-    final bool isVideo = provider.selectedVideoTrackId != null;
-    final bool isAudio = provider.selectedAudioTrack != null;
+    if (toolbarType == 'audio') {
+      return _buildAudioToolbar(context, provider);
+    }
 
+    // Default to edit mode (requires selection)
+    if (provider.selectedVideoTrackId == null) {
+      return const SizedBox.shrink();
+    }
+
+    return _buildEditToolbar(context, provider);
+  }
+
+  Widget _buildAudioToolbar(BuildContext context, VideoEditorProvider provider) {
     return Container(
-      height: 50,
+      height: 80,
       color: Colors.black.withOpacity(0.95),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
             const SizedBox(width: 16),
-            // Common tools
-            _tool(Icons.content_cut, 'Trim', () => provider.selectTool('trim')),
-            const SizedBox(width: 12),
-            _tool(Icons.call_split, 'Split', () {
-              final pos = provider.currentPosition;
-              if (provider.selectedVideoTrackId != null) {
-                provider.splitVideoAt(pos);
-              } else if (provider.selectedAudioTrack != null) {
-                provider.splitAudioAt(pos);
-              }
+            _tool(Icons.audiotrack, 'Extract', () {
+              // provider.openToolSheet('extract'); // if you have extract sheet
             }),
-            const SizedBox(width: 12),
-            _tool(Icons.swap_horiz, 'Replace', () {
-              if (isAudio) provider.openTool('audio'); // Replace mode
-              // Video replace can be added later
-            }),
-            const SizedBox(width: 12),
+            _tool(Icons.music_note, 'Sound', () => provider.openToolSheet('audio')),
+            _tool(Icons.graphic_eq, 'Sound FX', () {}),
+            _tool(Icons.mic, 'Record', () {}),
+            _tool(Icons.record_voice_over, 'Text to Audio', () {}),
+            const SizedBox(width: 16),
+          ],
+        ),
+      ),
+    );
+  }
 
-            // Video-only tools
-            if (isVideo) ...[
-              _tool(Icons.rotate_90_degrees_ccw, 'Rotate', () => provider.selectTool('rotate')),
-              const SizedBox(width: 12),
-              _tool(Icons.flip, 'Flip', () => provider.selectTool('flip')),
-              const SizedBox(width: 12),
-              _tool(Icons.fit_screen, 'Fill', () => provider.selectTool('fill')),
-              const SizedBox(width: 12),
-            ],
+  Widget _buildEditToolbar(BuildContext context, VideoEditorProvider provider) {
+    return Container(
+      height: 80,
+      color: Colors.black.withOpacity(0.95),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            const SizedBox(width: 16),
+            _tool(Icons.content_cut, 'Trim', () => provider.openToolSheet('trim')),
+            _tool(Icons.speed, 'Speed', () {
+              provider.openToolSheet('speed');  // ← This method must exist
+            }),
+            _tool(Icons.rotate_90_degrees_ccw, 'Rotate', () {
+              provider.openToolSheet('rotate');
+            }),
+            _tool(Icons.flip, 'Flip', () => provider.openToolSheet('flip')),
+            _tool(Icons.fit_screen, 'Fill', () => provider.openToolSheet('fill')),
             const SizedBox(width: 16),
           ],
         ),

@@ -15,7 +15,7 @@ class AudioContextToolbar extends StatelessWidget {
       builder: (context, provider, child) {
         return GestureDetector(
           onTap: () {
-            provider.handleAudioToolTap(action);
+            provider.handleAudioToolTap(action, context: context);
           },
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8.0),
@@ -64,6 +64,11 @@ class AudioContextToolbar extends StatelessWidget {
             const SizedBox(width: 16),
             _toolItem(icon: Icons.record_voice_over, label: 'Text to Audio', action: 'texttoaudio'),
             const SizedBox(width: 16),
+            _toolItem(
+              icon: Icons.content_cut,
+              label: 'Trim',
+              action: '',
+            ),
           ],
         ),
       ),

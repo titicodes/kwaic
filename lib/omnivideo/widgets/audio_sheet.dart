@@ -141,7 +141,7 @@ class _AudioLibrarySheetState extends State<AudioLibrarySheet>
         newFile: safeFile,
       );
     } else {
-      await provider.addAudio(
+      await provider.addAudio(  // ← calls the fixed version above
         file: safeFile,
         start: widget.insertPosition,
       );
@@ -149,10 +149,17 @@ class _AudioLibrarySheetState extends State<AudioLibrarySheet>
 
     await _previewPlayer.stop();
 
-    // Close sheet properly without Navigator.pop
+    // Correct close: return to context toolbar
     provider
       ..showBottomSheet = false
-      ..showContextToolbar = true;
+      ..showContextToolbar = true
+      ..notifyListeners();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Audio added to timeline!')),
+      );
+    }
   }
 
   @override
